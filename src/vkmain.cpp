@@ -278,12 +278,15 @@ int main(int argc, char** argv) {
     int f = (g_frame >= 0) ? g_frame : li;  // --frame N renders orbit index N
     CamUniform u = ro0;
     // camera move across the clip: starts high and far, looking down at
-    // the subject; pans 60 deg while dollying in and dropping to a low
-    // angle. All terms share one smoothstep ease (slow start/end).
-    double p = (frames > 1) ? (double)f / (double)(frames - 1) : 0.0;
+    // the subject; pans ~20 deg to the right (toward the sun) so the
+    // sun's floor reflection stays framed, while dollying in and
+    // dropping to a low angle. p = progress across the canonical
+    // 150-frame clip, so `--frames 1 --frame N` previews the exact
+    // video-frame camera. All terms share one smoothstep ease.
+    double p = (double)f / (double)149.0;
     double e = p * p * (3.0 - 2.0 * p);
     const double th0 = atan2(2.33, 2.53);  // same start bearing as the old pan
-    double th = th0 + (3.141592653589793 / 3.0) * e;   // 60 deg pan
+    double th = th0 - (20.0 * 3.141592653589793 / 180.0) * e;   // ~20 deg pan, toward the sun
     double R = 4.40 + (2.80 - 4.40) * e;               // far  -> close
     double H = 2.90 + (1.00 - 2.90) * e;               // high -> low
     u.ro[0] = 0.02f + (float)(R * cos(th));

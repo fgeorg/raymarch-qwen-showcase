@@ -108,7 +108,7 @@ vec2 map(vec3 p) {
   float dRing = sdTorus(p - c0, 0.80, 0.27);
   float dS1   = sdSphere(p - g_b1, 0.34);
   float dS2   = sdSphere(p - g_b2, 0.32);
-  float dS3   = sdSphere(p - vec3(-0.63, 0.50 + 0.05 * sin(0.0275 * cam.time + 2.0), 0.19), 0.30);
+  float dS3   = sdSphere(p - vec3(-0.63, 0.50 + 0.05 * sin(0.055 * cam.time + 2.0), 0.19), 0.30);
   float dS4   = sdSphere(p - g_b3, 0.26);
   float dS5   = sdSphere(p - g_b4, 0.23);
   float goo = smin(smin(dCore, dRing, 0.24), dS1, 0.20);
@@ -122,7 +122,7 @@ vec2 map(vec3 p) {
   float d  = carved;
   float id = (goo < 0.0 && dCut < 0.0) ? 2.0 : 1.0;
 
-  float dGold = sdSphere(p - vec3(0.0, 0.95, 0.0), 0.27);
+  float dGold = sdSphere(p - vec3(0.0, 0.95 + 0.09 * sin(0.09 * cam.time + 1.0), 0.0), 0.27);
   if (dGold < d) { d = dGold; id = 3.0; }
   if (p.y < d)   { d = p.y;   id = 4.0; }
   return vec2(d, id);
@@ -315,7 +315,7 @@ float softKneeC(float x, float knee) {
 void main() {
   ivec2 px = ivec2(gl_GlobalInvocationID.xy);
 
-  initMorph(0.05 * cam.time);
+  initMorph(0.10 * cam.time);
 
   vec3 ro = cam.ro, ta = cam.ta;
   vec3 fw = normalize(ta - ro);
