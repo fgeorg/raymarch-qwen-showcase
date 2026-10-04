@@ -143,15 +143,15 @@ int main(int argc, char** argv) {
     return (uint32_t)-1;
   };
 
-  auto mkBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage, VkBufferUsageFlags usage2,
+  auto mkBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
                    uint32_t need, uint32_t prefer, VkBuffer* out, VkDeviceMemory* outMem) -> int {
     VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bc.size = size;
-    bc.usage = usage | usage2;
+    bc.usage = usage;
     VK_CHECK(vkCreateBuffer(dev, &bc, nullptr, out));
     VkMemoryRequirements mr;
     vkGetBufferMemoryRequirements(dev, *out, &mr);
-    uint32_t mt = findMem(mr.size ? need : need, prefer);
+    uint32_t mt = findMem(need, prefer);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = mr.size;
     ai.memoryTypeIndex = mt;
@@ -166,23 +166,23 @@ int main(int argc, char** argv) {
   bool imgHostVisible;
   uint32_t both = findMem(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0);
   if (both != (uint32_t)-1) {  // fast: single host-visible+device-local buffer
-    if (mkBuf(imgBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0,
+    if (mkBuf(imgBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0, &imgBuf, &imgMem) != 0) return 1;
     imgHostVisible = true;
   } else {
-    if (mkBuf(imgBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    if (mkBuf(imgBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &imgBuf, &imgMem) != 0) return 1;
     imgHostVisible = false;
   }
   VkBuffer stageBuf;
   VkDeviceMemory stageMem;
   if (!imgHostVisible)
-    if (mkBuf(imgBytes, 0, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    if (mkBuf(imgBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0, &stageBuf, &stageMem) != 0) return 1;
 
   VkBuffer uniBuf;
   VkDeviceMemory uniMem;
-  if (mkBuf(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0,
+  if (mkBuf(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0, &uniBuf, &uniMem) != 0) return 1;
   void* uniPtr;
   VK_CHECK(vkMapMemory(dev, uniMem, 0, 256, 0, &uniPtr));

@@ -36,10 +36,9 @@ Requirements: Linux, `g++`, `glslangValidator`, `make`, a Vulkan device
 `ffmpeg` for the video.
 
 ```sh
-make            # build GPU (Vulkan compute) + CPU fallback renderer
+make            # build the GPU (Vulkan compute) renderer
 make run        # one 1024^2 frame -> out/render.png (16-bit), GPU-timed
-make video      # 300-frame 360° orbit -> out/frames -> out/showcase.mp4 (10 s @ 30 fps)
-make cpu        # CPU fallback only (slow, for reference)
+make video      # 150-frame clip (10 s @ 15 fps) -> out/frames -> out/showcase.mp4
 ```
 
 Runtime fuzz: `make run FZZ=0.5` (crisp) .. `FZZ=2.0` (fuzzy). Fuzz scales the
@@ -82,8 +81,7 @@ Speed measures with no quality loss:
 
 - `src/scene.comp` — the whole renderer (SDF scene, tracing, shading).
 - `src/vkmain.cpp` — headless Vulkan host: device selection, compute dispatch,
-  GPU timing, 16-bit PNG writer, 300-frame orbit.
-- `src/raymarch.cpp` — CPU fallback raymarcher (reference implementation).
+  GPU timing, 16-bit PNG writer, 150-frame camera pan + dolly.
 - `Makefile` — build/run/video targets.
 
 ---
