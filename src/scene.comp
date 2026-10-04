@@ -1,0 +1,347 @@
+// GPU SDF path tracer — showcase of smoothmin + soft-boolean effects.
+//
+// Pure path tracing, the sky is the ONLY light:
+//   - primary rays: sphere-traced against the SDF scene
+//   - at each hit: sample the BSDF — Lambert diffuse, or a uniform-fuzz
+//     specular (mirror direction perturbed by a uniform disc scaled by
+//     roughness), then continue the path
+//   - paths terminate when they escape into the procedural sky
+//     (a gradient environment with a soft sun lobe — no NEE, no shadow rays)
+//   - Russian roulette after bounce 2
+//
+// Quality knobs (Makefile: GPU_FLAGS="-DAA_SAMPLES=8 -DMAX_BOUNCES=8"):
+//   -DAA_SAMPLES=6 -DMAX_BOUNCES=6 -DMAX_STEPS=40
+// runtime: --fuzz 0.5 crisp .. 2.0 fuzzy (scales the uniform-fuzz specular radius)
+
+#version 450
+
+#ifndef AA_SAMPLES
+#define AA_SAMPLES 128
+#endif
+#ifndef MAX_STEPS
+#define MAX_STEPS 160
+#endif
+#ifndef MAX_BOUNCES
+#define MAX_BOUNCES 6
+#endif
+
+layout(local_size_x = 32, local_size_y = 32) in;
+
+layout(set = 0, binding = 0) uniform Cam {
+  vec3  ro;
+  vec3  ta;
+  float focal;
+  float res;
+  float time;
+  float seed;
+  float fuzz;
+} cam;
+
+layout(set = 0, binding = 1) writeonly buffer Img { vec4 c[]; } img;
+const int IMW = 1024;
+
+const float PI = 3.14159265359;
+
+// scene bounding sphere (encloses all non-plane geometry); rays that miss it
+// can only hit the analytic floor plane, so the march skips SDF work.
+const vec3  BOUND_C = vec3(0.0, 0.70, 0.0);
+const float BOUND_R = 1.35;
+bool boundEnter(vec3 ro, vec3 rd, out float mT) {
+  vec3 d = ro - BOUND_C;
+  float b = dot(d, rd);
+  float disc = b * b - (dot(d, d) - BOUND_R * BOUND_R);
+  if (disc < 0.0) { mT = 1e30; return false; }
+  mT = -b + sqrt(disc);
+  return true;
+}
+
+float hash21(float x, float y) {
+  return fract(sin(x * 12.9898 + y * 78.233) * 43758.5453);
+}
+
+// integer-coordinate hash (no sin() float-precision periodicity)
+float hash21i(int x, int y) {
+  uint n = uint(x) * 1973u + uint(y) * 9277u + 12345u;
+  n = (n << 13u) ^ n;
+  n = n * (n * n * 15731u + 789221u) + 1376312589u;
+  return float(n & 0x7fffffffu) * (1.0 / 2147483648.0);
+}
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+float sdiff(float a, float b, float k) { return -smin(-a, b, k); }
+
+float sdSphere(vec3 p, float r) { return length(p) - r; }
+float sdTorus(vec3 p, float R, float r) {
+  float q1 = sqrt(p.x * p.x + p.z * p.z) - R;
+  return sqrt(q1 * q1 + p.y * p.y) - r;
+}
+
+// --- scene ------------------------------------------------------------------
+// smoothmin showcase: core sphere + a torus ring melted around it + three
+// satellite spheres (two orbiting), all one fused "goo" material.
+// boolean showcase: a soft difference (sdiff) carves a bowl into the top;
+// a hard-unioned gold sphere sits inside the bowl.
+vec3  g_b1, g_b2;
+float g_cutR;
+
+void initMorph(float tm) {
+  float a1 = 0.75 + 0.25 * sin(0.45 * tm);
+  float a2 = 1.80 + 0.25 * sin(0.38 * tm + 1.0);
+  g_b1   = vec3(0.72 * cos(a1), 0.50 + 0.08 * sin(0.80 * tm + 0.5), 0.72 * sin(a1));
+  g_b2   = vec3(-0.66 * cos(a2), 0.48 + 0.10 * sin(0.70 * tm + 1.4), -0.66 * sin(a2));
+  g_cutR = 0.72 + 0.05 * sin(0.50 * tm + 0.2);
+}
+
+// id: 1=goo 2=bowl interior (carved goo) 3=gold 4=floor
+vec2 map(vec3 p) {
+  vec3 c0 = vec3(0.0, 0.62, 0.0);
+  float dCore = sdSphere(p - c0, 0.60);
+  float dRing = sdTorus(p - c0, 0.80, 0.27);
+  float dS1   = sdSphere(p - g_b1, 0.34);
+  float dS2   = sdSphere(p - g_b2, 0.32);
+  float dS3   = sdSphere(p - vec3(-0.63, 0.50 + 0.05 * sin(0.55 * cam.time + 2.0), 0.19), 0.30);
+  float goo = smin(smin(dCore, dRing, 0.24), dS1, 0.20);
+  goo = smin(smin(goo, dS2, 0.20), dS3, 0.20);
+
+  // soft boolean: carve a wide shallow bowl into the top
+  float dCut   = sdSphere(p - vec3(0.0, 1.40, 0.0), g_cutR);
+  float carved = sdiff(goo, dCut, 0.13);
+
+  float d  = carved;
+  float id = (goo < 0.0 && dCut < 0.0) ? 2.0 : 1.0;
+
+  float dGold = sdSphere(p - vec3(0.0, 0.95, 0.0), 0.27);
+  if (dGold < d) { d = dGold; id = 3.0; }
+  if (p.y < d)   { d = p.y;   id = 4.0; }
+  return vec2(d, id);
+}
+
+vec3 trace(vec3 ro, vec3 rd, out float id, float maxT) {
+  // analytic floor hit first: it is a valid surface everywhere, so it
+  // both caps the march and serves as the fallback once a ray has left
+  // the bounding sphere (the SDF geometry all lives inside the sphere).
+  const float INF = 1e30;
+  float tFloor = (rd.y < -1e-6 && ro.y > 0.0) ? -ro.y / rd.y : INF;
+  maxT = min(maxT, tFloor);
+  float mT;
+  if (!boundEnter(ro, rd, mT)) {
+    id = (tFloor < INF * 0.5) ? 4.0 : -1.0;
+    return (tFloor < INF * 0.5) ? ro + rd * tFloor : ro + rd * maxT;
+  }
+  float t = 0.0;
+  id = -1.0;
+  mT = min(mT, maxT);
+  for (int i = 0; i < MAX_STEPS; i++) {
+    vec2 h = map(ro + rd * t);
+    if (h.x < 0.0016 + 0.0008 * t) { id = h.y; return ro + rd * t; }
+    t += h.x;
+    if (t > mT) break;
+  }
+  if (tFloor < INF * 0.5) { id = 4.0; return ro + rd * tFloor; }
+  id = -1.0;
+  return ro + rd * maxT;
+}
+
+vec3 calcNormal(vec3 p) {
+  const float e = 0.0012;
+  vec3 n = vec3(
+    e * map(p + vec3(e, 0, 0)).x - e * map(p + vec3(-e, 0, 0)).x,
+    e * map(p + vec3(0, e, 0)).x - e * map(p + vec3(0, -e, 0)).x,
+    e * map(p + vec3(0, 0, e)).x - e * map(p + vec3(0, 0, -e)).x);
+  return normalize(n);
+}
+
+// Lift a hit point just off the surface along its normal, using the SDF to
+// stop as soon as we are clear (adaptive — a fixed offset overshoots thin
+// carved features like the bowl rim).
+vec3 offsetSurf(vec3 p, vec3 N) {
+  float t = 0.0;
+  for (int i = 0; i < 6; i++) {
+    float h = map(p + N * t).x;
+    if (h > 0.012) break;
+    t += max(h, 0.003);
+  }
+  return p + N * (t + 0.002);
+}
+
+// --- sky: the only light in the scene ---------------------------------------
+// Dusk-like gradient environment: cool blue zenith, bright horizon with a
+// warm peach side fading to cool slate. Below the horizon we hold the
+// horizon color so specular reflections melt into the horizon line instead
+// of painting a fake dark band.
+vec3 skyRay(vec3 rd) {
+  float y = rd.y;
+  vec2 hz = rd.xz;
+  float hl = max(length(hz), 1e-4);
+  float warm = pow(clamp(dot(hz / hl, vec2(-0.73, -0.68)), 0.0, 1.0), 1.3);
+  vec3 zen = vec3(0.22, 0.38, 0.74);
+  vec3 hor = mix(vec3(0.52, 0.60, 0.78), vec3(1.55, 0.86, 0.45), warm);
+  float m = pow(clamp(1.0 - max(y, 0.0), 0.0, 1.0), 2.8);
+  vec3 col = mix(zen, hor, m);
+  if (y < 0.0) {
+    float g = smoothstep(0.0, -0.25, y);
+    col = mix(col, hor, g);
+  }
+  // soft low sun, left of frame: warm key light on the subject bright core + wide warm glow (also
+  // visible in floor reflections just below the horizon)
+  vec3 sd = normalize(vec3(-0.82, 0.16, -0.56));
+  float ss = max(dot(rd, sd), 0.0);
+  col += vec3(1.40, 0.88, 0.52) * (pow(ss, 900.0) * 8.0 + pow(ss, 24.0) * 0.22);
+  return col;
+}
+
+// --- materials ---------------------------------------------------------------
+vec3 getAlbedo(float id) {
+  if (id < 1.5) return vec3(0.80, 0.85, 0.95);   // goo (light dielectric)
+  if (id < 2.5) return vec3(0.80, 0.85, 0.95);   // bowl interior (carved goo)
+  if (id < 3.5) return vec3(1.00, 0.62, 0.26);   // gold
+  return vec3(0.50, 0.47, 0.44);                 // floor
+}
+float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.05); }  // goo: mostly diffuse + light fresnel
+// --fuzz scales the uniform-fuzz radius (0.5 crisp .. 2.0 blurry)
+float getRough(float id) {
+  float base;
+  if (id < 1.5)      base = 0.28;
+  else if (id < 2.5) base = 0.35;
+  else if (id < 3.5) base = 0.38;
+  else               base = 0.19;
+  return clamp(base * cam.fuzz, 0.03, 1.0);
+}
+vec3 getF0(vec3 alb, float metal) { return mix(vec3(0.02), alb, metal); }
+
+// --- BSDF sampling -----------------------------------------------------------
+vec3 reflectDir(vec3 I, vec3 N) { return I - N * (2.0 * dot(I, N)); }
+
+vec3 frameT(vec3 N) {
+  vec3 up = (abs(N.y) < 0.99) ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  return normalize(cross(up, N));
+}
+
+// Stratified sample for path `s` (0..AA-1) at bounce `b`: the pixel's AA
+// paths each take a different cell of [0,1) (rotated per bounce so the same
+// path does not reuse a cell), and a per-pixel jitter fills the cell.
+float strat(float s, int off, float rnd, float mul) {
+  int cell = int(mod(s + float(off), float(AA_SAMPLES)));
+  return (float(cell) + fract(rnd * mul)) / float(AA_SAMPLES);
+}
+
+// Uniform-fuzz specular (a la wendelich): mirror direction perturbed by a
+// uniform disc in the tangent plane, radius = roughness. No microfacet
+// nonsense — just a uniform random blur of the reflection.
+vec3 fuzzReflect(vec3 Rm, vec3 N, float rough, float u1, float u2, float u3) {
+  float a = 2.0 * PI * u1;
+  float rad = rough * sqrt(u2);
+  float h = (u3 - 0.5) * 2.0 * rough;
+  vec3 T = frameT(N);
+  vec3 B = cross(N, T);
+  return normalize(Rm + (T * (rad * cos(a)) + B * (rad * sin(a)) + N * h));
+}
+
+// Uniform hemisphere sample (Lambert)
+vec3 hemiSample(vec3 N, float u1, float u2) {
+  float a = 2.0 * PI * u1;
+  float r = sqrt(u2);
+  vec3 T = frameT(N);
+  vec3 B = cross(N, T);
+  return normalize(T * (r * cos(a)) + B * (r * sin(a)) + N * sqrt(max(0.0, 1.0 - r * r)));
+}
+
+// --- path tracer --------------------------------------------------------------
+// Sky (with its soft sun lobe) is the only emitter: no NEE, no shadow rays. Each bounce is a
+// BSDF sample; the path ends in the sky (its radiance is the contribution)
+// or is killed by Russian roulette.
+vec3 pathTrace(vec3 ro, vec3 rd, float rnd, float s) {
+  vec3 col = vec3(0.0);
+  vec3 T = vec3(1.0);
+  for (int b = 0; b < MAX_BOUNCES; b++) {
+    float id;
+    vec3 pos = trace(ro, rd, id, 40.0);
+    if (id < 0.0) { col += T * skyRay(rd); break; }
+    if (b == MAX_BOUNCES - 1) break;  // last bounce: no continuation
+
+    vec3 N = (id > 3.5) ? vec3(0.0, 1.0, 0.0) : calcNormal(pos);
+    float metal = getMetal(id);
+    float rough = getRough(id);
+    vec3  alb   = getAlbedo(id);
+    vec3  F0    = getF0(alb, metal);
+    vec3  off   = offsetSurf(pos, N);
+
+    float uS = strat(s, b * 5 + 1, rnd, 12.9898);
+    float u1 = strat(s, b * 5 + 2, rnd, 78.2330);
+    float u2 = strat(s, b * 5 + 3, rnd, 37.7194);
+    float u3 = strat(s, b * 5 + 4, rnd, 11.1357);
+
+    if (uS < clamp(metal, 0.0, 1.0)) {
+      // specular: uniform fuzz around the mirror direction
+      vec3 R = fuzzReflect(reflectDir(rd, N), N, rough, u1, u2, u3);
+      if (dot(R, N) < 0.004) break;   // escaped below the surface
+      T *= F0 + (vec3(1.0) - F0) * pow(1.0 - dot(R, N), 5.0);  // Schlick: F->1 at grazing
+      rd = R;
+    } else {
+      rd = hemiSample(N, u1, u2);
+      T *= alb;                       // wendelich-style: no cosine, no 2x
+    }
+
+    // Russian roulette after bounce 2
+    if (b >= 2) {
+      float q = max(max(T.x, T.y), T.z);
+      if (hash21(rnd + b * 3.1, 7.7) > q) break;
+      T /= max(q, 1e-4);
+    }
+    ro = off;
+  }
+  return col;
+}
+
+float acesComp(float x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+float softKneeC(float x, float knee) {
+  return (x <= knee) ? x : knee + (x - knee) / (1.0 + 2.0 * (x - knee));
+}
+
+void main() {
+  ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+
+  initMorph(0.05 * cam.time);
+
+  vec3 ro = cam.ro, ta = cam.ta;
+  vec3 fw = normalize(ta - ro);
+  vec3 rt = normalize(cross(fw, vec3(0, 1, 0)));
+  vec3 up = cross(rt, fw);
+  float res = cam.res;
+
+  float baseRnd = cam.seed + hash21i(int(px.x), int(px.y)) * 43758.5453;
+  const int AAc = (AA_SAMPLES <= 4) ? 2 : 3;
+  const int AAr = (AA_SAMPLES + AAc - 1) / AAc;
+  vec3 acc = vec3(0.0);
+  for (int s = 0; s < AA_SAMPLES; s++) {
+    vec2 sub = (vec2(float(s % AAc), float(s / AAc)) + 0.5) / vec2(float(AAc), float(AAr));
+    float jx = hash21(baseRnd + float(s) * 0.618,  baseRnd * 1.31 + float(s) * 0.371) - 0.5;
+    float jy = hash21(baseRnd * 1.71 + float(s) * 0.537, baseRnd * 2.13 + float(s) * 0.917) - 0.5;
+    float pxu = (2.0 * (float(px.x) + sub.x + jx - 0.5) - res) / res;
+    float pyu = (res - 2.0 * (float(px.y) + sub.y + jy - 0.5)) / res;  // top row = up
+    vec3 rd = normalize(fw * cam.focal + rt * pxu + up * pyu);
+    acc += pathTrace(ro, rd, baseRnd + float(s) * 31.0, float(s));
+  }
+
+  vec3 col = acc * (1.0 / float(AA_SAMPLES)) * 0.96;  // exposure
+  col = vec3(softKneeC(col.x, 2.5), softKneeC(col.y, 2.5), softKneeC(col.z, 2.5));
+  col = vec3(acesComp(col.x * 1.02), acesComp(col.y * 1.02), acesComp(col.z * 1.02));
+  col = pow(col, vec3(0.92));
+
+  float uvx = (2.0 * (float(px.x) + 0.5) - res) / res;
+  float uvy = (res - 2.0 * (float(px.y) + 0.5)) / res;
+  float vig = 1.0 - 0.30 * 0.36 * (uvx * uvx + uvy * uvy);
+  float dith = (hash21i(int(px.x) * 3 + 11, int(px.y) * 7 + 5) - 0.5) * (1.0 / 65535.0);
+
+  vec4 outc;
+  outc.x = clamp(col.x * vig + dith, 0.0, 1.0);
+  outc.y = clamp(col.y * vig + dith, 0.0, 1.0);
+  outc.z = clamp(col.z * vig + dith, 0.0, 1.0);
+  outc.w = 1.0;
+  img.c[px.y * IMW + px.x] = outc;
+}

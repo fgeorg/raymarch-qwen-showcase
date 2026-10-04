@@ -1,0 +1,505 @@
+// GPU SDF raymarcher — showcase of smoothmin + soft boolean effects.
+//
+// Pure tracing everywhere:
+//   - primary rays: sphere-traced
+//   - soft shadows: real SDF marches toward the sun, stratified over the
+//     sun disc (penumbra from geometry — no 7h/t approximation)
+//   - ambient: hemisphere samples, each occlusion-tested by a short SDF
+//     march, weighted by the traced sky radiance
+//   - specular: GGX microfacet directions, each a full traced ray
+//
+// Quality knobs (Makefile: GPU_FLAGS="-DAA_SAMPLES=12 ..."):
+//   -DAA_SAMPLES=10 -DSHADOW_SAMPLES=16 -DSHADOW_STEPS=10
+//   -DAO_SAMPLES=8 -DAO_STEPS=8
+//   -DSPEC_SAMPLES=12 -DREFL_DEPTH=1
+// runtime: --fuzz 0.5 crisp .. 2.0 fuzzy (scales microfacet roughness and
+//   the traced shadow penumbra width)
+//
+// Speed measures (no quality loss):
+//   - scene bounding sphere early-exits every march in empty space
+//   - bounce (depth>=1) sub-shading uses lighter sampling
+//   - shadow/AO rays escape self-intersection with a few extra steps
+//     instead of a larger (biased) start offset
+
+#version 450
+
+#ifndef AA_SAMPLES
+#define AA_SAMPLES 6
+#endif
+#ifndef MAX_STEPS
+#define MAX_STEPS 36
+#endif
+#ifndef SHADOW_SAMPLES
+#define SHADOW_SAMPLES 12
+#endif
+#ifndef SHADOW_STEPS
+#define SHADOW_STEPS 8
+#endif
+#ifndef AO_SAMPLES
+#define AO_SAMPLES 6
+#endif
+#ifndef AO_STEPS
+#define AO_STEPS 6
+#endif
+#ifndef SPEC_SAMPLES
+#define SPEC_SAMPLES 8
+#endif
+#ifndef REFL_DEPTH
+#define REFL_DEPTH 1
+#endif
+
+layout(local_size_x = 32, local_size_y = 32) in;
+
+layout(set = 0, binding = 0) uniform Cam {
+  vec3  ro;
+  vec3  ta;
+  float focal;
+  float res;
+  float time;
+  float seed;
+  float fuzz;
+} cam;
+
+layout(set = 0, binding = 1) writeonly buffer Img { vec4 c[]; } img;
+const int IMW = 1024;
+
+const float PI = 3.14159265359;
+const vec3  SUN = normalize(vec3(-0.35, 0.55, 0.60));  // key: left-front-top, warm
+const vec3  SUN_COL = vec3(1.0, 0.95, 0.88) * 2.4;
+const float SUN_R = 0.130;  // traced shadow disc radius
+
+// scene bounding sphere (encloses all non-plane geometry)
+const vec3  BOUND_C = vec3(0.0, 0.80, 0.0);
+const float BOUND_R = 1.75;
+// true if the ray can enter the bounding sphere; mT = cap distance (near
+// root). A miss means only the analytic floor plane can still be hit.
+bool boundEnter(vec3 ro, vec3 rd, out float mT) {
+  vec3 d = ro - BOUND_C;
+  float b = dot(d, rd);
+  float disc = b * b - (dot(d, d) - BOUND_R * BOUND_R);
+  if (disc < 0.0) { mT = 1e30; return false; }
+  mT = -b + sqrt(disc);
+  return true;
+}
+
+float hash21(float x, float y) {
+  return fract(sin(x * 12.9898 + y * 78.233) * 43758.5453);
+}
+vec3 hash33(float seed) {
+  float px = fract(seed * 443.897), py = fract(seed * 441.423), pz = fract(seed * 437.195);
+  float d = px * (py + 19.19) + py * (pz + 19.19) + pz * (px + 19.19);
+  px += d; py += d; pz += d;
+  return vec3(fract((px + py) * pz), fract((px + px) * py), fract((py + px) * px));
+}
+
+
+// integer-coordinate hash (no sin() float-precision periodicity)
+float hash21i(int x, int y) {
+  uint n = uint(x) * 1973u + uint(y) * 9277u + 12345u;
+  n = (n << 13u) ^ n;
+  n = n * (n * n * 15731u + 789221u) + 1376312589u;
+  return float(n & 0x7fffffffu) * (1.0 / 2147483648.0);
+}
+
+// low-discrepancy (Halton) generators: stratified MC at fixed counts
+float halton(int i, int b) {
+  float f = 1.0 / float(b), r = 0.0;
+  for (int k = i; k > 0; k /= b) r += f * float(k % b);
+  f /= float(b);
+  return r;
+}
+vec3 halton3(int i) { return vec3(halton(i, 2), halton(i, 3), halton(i, 5)); }
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+float sdiff(float a, float b, float k) { return -smin(-a, b, k); }
+
+float sdSphere(vec3 p, float r) { return length(p) - r; }
+float sdTorus(vec3 p, float R, float r) {
+  float q1 = sqrt(p.x * p.x + p.z * p.z) - R;
+  return sqrt(q1 * q1 + p.y * p.y) - r;
+}
+
+// per-invocation morph state (time = 0.05 * frame)
+vec3  g_b1, g_b2;
+float g_cutR;
+
+void initMorph(float tm) {
+  float a1 = 0.75 + 0.25 * sin(0.45 * tm);
+  float a2 = 2.85 + 0.25 * sin(0.38 * tm + 1.0);
+  g_b1   = vec3(0.72 * cos(a1), 0.50 + 0.08 * sin(0.80 * tm + 0.5), 0.72 * sin(a1));
+  g_b2   = vec3(-0.66 * cos(a2), 0.48 + 0.10 * sin(0.70 * tm + 1.4), -0.66 * sin(a2));
+  g_cutR = 0.62 + 0.05 * sin(0.50 * tm + 0.2);
+}
+
+// id: 1=goo 2=bowl interior (same goo material — it is carved out of it)
+//     3=gold 4=floor
+vec2 map(vec3 p) {
+  float dMain = sdSphere(p - vec3(0.0, 0.62, 0.0), 0.60);
+  float dS1   = sdSphere(p - g_b1, 0.34);
+  float dS2   = sdSphere(p - g_b2, 0.32);
+  float dS3   = sdSphere(p - vec3(0.08, 0.48 + 0.06*sin(0.55*cam.time+2.0), 0.66), 0.32);
+  float goo   = smin(smin(smin(dMain, dS1, 0.20), dS2, 0.20), dS3, 0.20);
+
+  // boolean showcase: wide shallow bowl carved into the top
+  float dCut   = sdSphere(p - vec3(0.0, 1.42, 0.0), g_cutR);
+  float carved = sdiff(goo, dCut, 0.13);
+
+  float d  = carved;
+  float id = (goo < 0.0 && dCut < 0.0) ? 2.0 : 1.0;
+
+  float dGold = sdSphere(p - vec3(0.0, 0.92 + 0.04 * sin(0.50 * cam.time), 0.0), 0.27);
+  if (dGold < d) { d = dGold; id = 3.0; }
+  if (p.y < d)   { d = p.y;   id = 4.0; }
+  return vec2(d, id);
+}
+
+vec3 trace(vec3 ro, vec3 rd, out float id, float maxT) {
+  float mT;
+  if (!boundEnter(ro, rd, mT)) {
+    // nothing but the analytic floor plane is reachable
+    if (rd.y < -1e-6) {
+      float tp = -ro.y / rd.y;
+      if (tp < maxT) { id = 4.0; return ro + rd * tp; }
+    }
+    id = -1.0;
+    return ro + rd * maxT;
+  }
+  float t = 0.0;
+  id = -1.0;
+  mT = min(mT, maxT);
+  for (int i = 0; i < MAX_STEPS; i++) {
+    vec2 h = map(ro + rd * t);
+    if (h.x < 0.0016 + 0.0008 * t) { id = h.y; return ro + rd * t; }
+    t += h.x;
+    if (t > mT) break;
+  }
+  id = -1.0;
+  return ro + rd * mT;
+}
+
+vec3 calcNormal(vec3 p) {
+  const float e = 0.0012;
+  vec3 n = vec3(
+    e * map(p + vec3(e, 0, 0)).x - e * map(p + vec3(-e, 0, 0)).x,
+    e * map(p + vec3(0, e, 0)).x - e * map(p + vec3(0, -e, 0)).x,
+    e * map(p + vec3(0, 0, e)).x - e * map(p + vec3(0, 0, -e)).x);
+  return normalize(n);
+}
+
+// Lift a hit point just off the surface along its normal, using the SDF to
+// stop as soon as we are clear. Adaptive: a fixed offset overshoots thin
+// carved features (bowl rim) and lifts shadow/AO origins off the geometry.
+vec3 offsetSurf(vec3 p, vec3 N) {
+  float t = 0.0;
+  for (int i = 0; i < 6; i++) {
+    float h = map(p + N * t).x;
+    if (h > 0.012) break;
+    t += max(h, 0.003);
+  }
+  return p + N * (t + 0.002);
+}
+
+// one real SDF march toward the sun; escapes self-intersection first
+bool shadowHit(vec3 ro, vec3 rd) {
+  float mT;
+  if (!boundEnter(ro, rd, mT)) return false;  // sun ray misses all geometry
+  float t = 0.03;
+  for (int k = 0; k < 24; k++) {
+    float h = map(ro + rd * t).x;
+    if (h > 0.002) break;
+    t += max(h, 0.008) + 0.008;
+    if (t > mT) return false;
+  }
+  for (int i = 0; i < SHADOW_STEPS; i++) {
+    float h = map(ro + rd * t).x;
+    if (h < 0.001 + 0.0004 * t) return true;
+    t += min(h, 0.5);
+    if (t > mT) break;
+  }
+  return false;
+}
+
+// soft shadow: shadow rays stratified over the sun disc (equal-area rings,
+// golden-angle bins + jitter) — all real marches, far lower penumbra noise
+// than pure random
+float softShadowTraced(vec3 ro, vec3 rd, float rnd, int nsh) {
+  vec3 u = normalize(cross(rd, (abs(rd.y) < 0.99) ? vec3(0, 1, 0) : vec3(1, 0, 0)));
+  vec3 v = cross(rd, u);
+  float vis = 0.0;
+  float disc = SUN_R * (0.45 + 0.65 * cam.fuzz);  // fuzz widens the traced penumbra (strong)
+  float invN = 1.0 / float(nsh);
+  for (int i = 0; i < nsh; i++) {
+    float fi = float(i);
+    float jr = hash21(rnd + fi * 0.618, fi * 1.31 + 4.2);
+    float ja = hash21(rnd * 1.31 + fi * 0.71, fi * 2.13 + 9.7);
+    float r = disc * sqrt(clamp((fi + 0.5 * jr) * invN, 0.0, 1.0));
+    float a = 2.0 * PI * fract(fi * 0.618 + ja * 0.5);
+    vec3 d = normalize(rd + (u * (r * cos(a)) + v * (r * sin(a))));
+    vis += shadowHit(ro, d) ? 0.0 : 1.0;
+  }
+  return vis * invN;
+}
+
+// Sky: clean cool gradient (blue zenith -> blue-gray horizon). Below the
+// horizon we hold the horizon color (NOT a dark band) so mirror-floor rays
+// fade smoothly to the horizon line instead of painting a fake dark "bowl".
+// The only warm term is the sun glow, visible only when looking toward the
+// sun (which sits behind the camera at frame 0).
+vec3 skyRay(vec3 rd) {
+  float y = rd.y;
+  vec3 zen = vec3(0.10, 0.27, 0.66);   // cool zenith
+  vec3 hor = vec3(0.50, 0.58, 0.70);   // cool blue-gray horizon
+  float m = pow(clamp(1.0 - max(y, 0.0), 0.0, 1.0), 4.0);
+  vec3 col = mix(zen, hor, m);
+  float s = clamp(dot(rd, SUN), 0.0, 1.0);
+  col += vec3(1.0, 0.94, 0.84) * (0.16 * pow(s, 8.0))     // soft warm glow
+       + vec3(1.15, 1.06, 0.95) * (2.4 * pow(s, 900.0));  // small sun disc
+  if (y < 0.0) {
+    float g = smoothstep(0.0, -0.25, y);
+    col = mix(col, hor, g);  // mirror-floor fade -> horizon color
+  }
+  return col;
+}
+
+vec3 getAlbedo(float id) {
+  if (id < 1.5) return vec3(0.07, 0.42, 0.47);
+  if (id < 2.5) return vec3(0.07, 0.42, 0.47);  // bowl interior = carved goo
+  if (id < 3.5) return vec3(1.00, 0.78, 0.48);
+  return vec3(0.40, 0.385, 0.36); // polished concrete (cool-neutral)
+}
+float getMetal(float id) { return (id > 3.5) ? 0.40 : ((id > 2.5) ? 1.0 : 0.0); }
+// fuzz (runtime, --fuzz): microfacet roughness multiplier (strong sweep).
+float getRough(float id) {
+  float base;
+  if (id < 1.5)      base = 0.42;
+  else if (id < 2.5) base = 0.58;  // bowl: same goo, a touch rougher in the concave
+  else if (id < 3.5) base = 0.14;  // gold: mirror dome, catches warm rim + glow -> gold
+  else               base = 0.62;  // floor: fuzzy at default; fuzz sweeps 0.31 (crisp) .. 1.0
+  return clamp(base * cam.fuzz, 0.02, 1.0);
+}
+vec3 getF0(vec3 alb, float metal) { return mix(vec3(0.02), alb, metal); }
+
+vec3 reflectDir(vec3 I, vec3 N) { return I - N * (2.0 * dot(I, N)); }
+
+// GGX half-vector sample (Marsaglia importance sampling). Exact for the lobe
+// at any roughness — even a ~= 0.9 (a^2 ~= 0.81) is a very wide lobe that is
+// still importance-sampled, so "fuzz" stays clean instead of turning into
+// patchy hemisphere noise.
+vec3 ggxSample(vec3 N, float rough, vec3 h) {
+  float a2 = rough * rough;
+  float u = h.z;
+  float cosT = sqrt((1.0 - u) / (1.0 + (a2 - 1.0) * u));
+  float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+  float phi = 2.0 * PI * h.x;
+  vec3 Hlocal = vec3(sinT * cos(phi), sinT * sin(phi), cosT);
+  vec3 up = (abs(N.y) < 0.99) ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  vec3 T = normalize(cross(up, N));
+  vec3 B = cross(N, T);
+  return normalize(T * Hlocal.x + B * Hlocal.y + N * Hlocal.z + N * 0.03);
+}
+
+// ambient: hemisphere samples, each occlusion-tested by a short SDF march,
+// weighted by the traced sky in that direction. Escapes self-intersection
+// first (normal-offset origins can sit inside concave necks).
+vec3 ambientOccl(vec3 p, vec3 N, float rnd, int nAO) {
+  vec3 up = (abs(N.y) < 0.99) ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  vec3 T = normalize(cross(up, N));
+  vec3 B = cross(N, T);
+  int sh = int(4095.0 * fract(rnd * 0.913));
+  vec3 amb = vec3(0.0);
+  for (int i = 0; i < nAO; i++) {
+    vec3 h = halton3(i + 1 + sh);
+    float r = sqrt(h.x), a = 2.0 * PI * h.y;
+    vec3 nd = normalize(N + (T * (r * cos(a)) + B * (r * sin(a)) + N * sqrt(max(0.0, 1.0 - r * r))) * 1.6);
+    float mT;
+    if (!boundEnter(p, nd, mT)) { amb += skyRay(nd); continue; }
+    float t = 0.03;
+    for (int k = 0; k < 24; k++) {
+      float hh = map(p + nd * t).x;
+      if (hh > 0.002) break;
+      t += max(hh, 0.008) + 0.008;
+    }
+    for (int j = 0; j < AO_STEPS; j++) {
+      float hh = map(p + nd * t).x;
+      if (hh < 0.001 + 0.0005 * t) break;
+      t += min(hh, 0.5);  // range up to ~4.2
+    }
+    amb += smoothstep(0.0, 4.2, t) * skyRay(nd);
+  }
+  return amb * (1.50 / float(nAO));
+}
+
+// Soft-knee firefly clamp (leaf fn — no call cycles for the Vulkan linker).
+float softKneeC(float x, float knee) {
+  return (x <= knee) ? x : knee + (x - knee) / (1.0 + 2.0 * (x - knee));
+}
+vec3 fireflyClamp(vec3 v, float knee) {
+  return vec3(softKneeC(v.x, knee), softKneeC(v.y, knee), softKneeC(v.z, knee));
+}
+
+// Bounded-depth evaluation: 3 fully-unrolled levels (this glslang's Vulkan
+// linker rejects any call cycle, so no recursion / shared shade fn).
+// depth 0 = primary (full sampling); deeper bounces use lighter sampling.
+vec3 evalRay1(vec3 ro, vec3 rd, float rnd);
+vec3 evalRay2(vec3 ro, vec3 rd, float rnd);
+
+vec3 evalRay0(vec3 ro, vec3 rd, float rnd) {
+  float id;
+  vec3 pos = trace(ro, rd, id, 40.0);
+  if (id < 0.0) return skyRay(rd);
+
+  vec3 N = (id > 3.5) ? vec3(0.0, 1.0, 0.0) : calcNormal(pos);
+  float metal = getMetal(id);
+  float rough = getRough(id);
+  vec3  alb   = getAlbedo(id);
+  vec3  F0    = getF0(alb, metal);
+
+  vec3  off = offsetSurf(pos, N);
+  float ndl = max(dot(N, SUN), 0.0);
+
+  int nSH = (id > 1.5 && id < 2.5) ? 16 : SHADOW_SAMPLES;  // bowl rim: contact-ring noise
+  float shadow = (ndl > 0.0) ? softShadowTraced(off, SUN, rnd, nSH) : 0.0;
+  vec3 dif = fireflyClamp(alb * SUN_COL * ndl * shadow * (1.0 - metal), 1.6);
+  int nAO = (id > 3.5) ? 6 : ((id > 1.5 && id < 2.5) ? 10 : AO_SAMPLES);  // far floor uniform
+  vec3 amb = ambientOccl(off, N, rnd, nAO) * alb * (1.0 - metal);
+
+  vec3 col = dif + amb;
+
+  // analytic fill + rim: lifts the shadow side, carves warm edges (no rays)
+  {
+    vec3 Lf = normalize(vec3(0.75, 0.10, 0.35));
+    vec3 Lr = normalize(vec3(-0.15, 0.50, -0.85));
+    float lf = max(dot(N, Lf), 0.0);
+    float lr = max(dot(N, Lr), 0.0);
+    float fres = pow(clamp(1.0 + dot(rd, N), 0.0, 1.0), 2.0);
+    vec3 tint = mix(alb, F0, metal);
+    vec3 ana = vec3(0.30, 0.40, 0.55) * 0.70 * lf * tint
+            + vec3(1.00, 0.80, 0.58) * 1.30 * pow(lr, 1.5) * (0.30 + 0.70 * fres) * tint;
+    col += fireflyClamp(ana, 1.6);
+  }
+  {
+    vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 + dot(rd, N), 5.0);
+    int nS = (id > 3.5) ? 10 : ((id > 2.5) ? 40 : SPEC_SAMPLES);  // floor 10, gold 40
+    int sh = int(4095.0 * fract(rnd * 0.731));
+    vec3 spec = vec3(0.0);
+    for (int i = 0; i < nS; i++) {
+      vec3 h = halton3(i + 1 + sh);
+      vec3 H = ggxSample(N, rough, h);
+      vec3 R = reflectDir(rd, H);
+      if (dot(R, N) < 0.0) continue;
+      spec += evalRay1(off, R, rnd + 13.7 + float(i));
+    }
+    float w = (nS > 0) ? 1.0 / float(nS) : 0.0;
+    col += fireflyClamp(F * spec * w, 1.4);
+  }
+  return col;
+}
+
+vec3 evalRay1(vec3 ro, vec3 rd, float rnd) {
+  float id;
+  vec3 pos = trace(ro, rd, id, 40.0);
+  if (id < 0.0) return skyRay(rd);
+
+  vec3 N = (id > 3.5) ? vec3(0.0, 1.0, 0.0) : calcNormal(pos);
+  float metal = getMetal(id);
+  float rough = getRough(id);
+  vec3  alb   = getAlbedo(id);
+  vec3  F0    = getF0(alb, metal);
+
+  vec3  off = offsetSurf(pos, N);
+  float ndl = max(dot(N, SUN), 0.0);
+
+  float shadow = (ndl > 0.0) ? softShadowTraced(off, SUN, rnd, 2) : 0.0;
+  vec3 dif = fireflyClamp(alb * SUN_COL * ndl * shadow * (1.0 - metal), 1.6);
+  vec3 amb = ambientOccl(off, N, rnd, 2) * alb * (1.0 - metal);
+
+  vec3 col = dif + amb;
+  if (true) {  // depth < REFL_DEPTH
+    vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 + dot(rd, N), 5.0);
+    int nS = (REFL_DEPTH > 1) ? 2 : 0;
+    vec3 spec = vec3(0.0);
+    for (int i = 0; i < nS; i++) {
+      vec3 h = hash33(rnd * 2.3 + 7.1 + float(i) * 0.523);
+      vec3 H = ggxSample(N, rough, h);
+      vec3 R = reflectDir(rd, H);
+      if (dot(R, N) < 0.0) continue;
+      spec += evalRay2(off, R, rnd + 13.7 + float(i));
+    }
+    float w = (nS > 0) ? 1.0 / float(nS) : 0.0;
+    col += fireflyClamp(F * spec * w, 1.4);
+  }
+  return col;
+}
+
+vec3 evalRay2(vec3 ro, vec3 rd, float rnd) {
+  float id;
+  vec3 pos = trace(ro, rd, id, 40.0);
+  if (id < 0.0) return skyRay(rd);
+
+  vec3 N = (id > 3.5) ? vec3(0.0, 1.0, 0.0) : calcNormal(pos);
+  float metal = getMetal(id);
+  float rough = getRough(id);
+  vec3  alb   = getAlbedo(id);
+  vec3  F0    = getF0(alb, metal);
+
+  vec3  off = offsetSurf(pos, N);
+  float ndl = max(dot(N, SUN), 0.0);
+
+  float shadow = (ndl > 0.0) ? softShadowTraced(off, SUN, rnd, 2) : 0.0;
+  vec3 dif = fireflyClamp(alb * SUN_COL * ndl * shadow * (1.0 - metal), 1.6);
+  vec3 amb = ambientOccl(off, N, rnd, 1) * alb * (1.0 - metal);
+
+  return dif + amb;
+}
+
+float acesComp(float x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+  ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+
+  initMorph(0.05 * cam.time);
+
+  vec3 ro = cam.ro, ta = cam.ta;
+  vec3 fw = normalize(ta - ro);
+  vec3 rt = normalize(cross(fw, vec3(0, 1, 0)));
+  vec3 up = cross(rt, fw);
+  float res = cam.res;
+
+  float baseRnd = cam.seed + hash21i(int(px.x), int(px.y)) * 43758.5453;
+  const int AAc = (AA_SAMPLES <= 4) ? 2 : 3;
+  const int AAr = (AA_SAMPLES + AAc - 1) / AAc;
+  float accX = 0.0, accY = 0.0, accZ = 0.0;
+  for (int s = 0; s < AA_SAMPLES; s++) {
+    vec2 sub = (vec2(float(s % AAc), float(s / AAc)) + 0.5) / vec2(float(AAc), float(AAr));
+    float jx = hash21(baseRnd + float(s) * 0.618,  baseRnd * 1.31 + float(s) * 0.371) - 0.5;
+    float jy = hash21(baseRnd * 1.71 + float(s) * 0.537, baseRnd * 2.13 + float(s) * 0.917) - 0.5;
+    float offx = sub.x + jx;
+    float offy = sub.y + jy;
+    float pxu = (2.0 * (float(px.x) + offx - 0.5) - res) / res;
+    float pyu = (res - 2.0 * (float(px.y) + offy - 0.5)) / res;  // top row = up
+    vec3 rd = normalize(fw * cam.focal + rt * pxu + up * pyu);
+    vec3 c = evalRay0(ro, rd, baseRnd + float(s) * 31.0);
+    accX += c.x; accY += c.y; accZ += c.z;
+  }
+  vec3 col = vec3(acesComp(accX / float(AA_SAMPLES) * 1.02),
+                  acesComp(accY / float(AA_SAMPLES) * 1.02),
+                  acesComp(accZ / float(AA_SAMPLES) * 1.02));
+  col = pow(col, vec3(0.92));
+
+  float uvx = (2.0 * (float(px.x) + 0.5) - res) / res;
+  float uvy = (res - 2.0 * (float(px.y) + 0.5)) / res;
+  float vig = 1.0 - 0.30 * 0.36 * (uvx * uvx + uvy * uvy);
+  float dith = (hash21i(int(px.x) * 3 + 11, int(px.y) * 7 + 5) - 0.5) * (1.0 / 65535.0);
+
+  vec4 outc;
+  outc.x = clamp(col.x * vig + dith, 0.0, 1.0);
+  outc.y = clamp(col.y * vig + dith, 0.0, 1.0);
+  outc.z = clamp(col.z * vig + dith, 0.0, 1.0);
+  outc.w = 1.0;
+  img.c[px.y * IMW + px.x] = outc;
+}
