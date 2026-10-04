@@ -278,8 +278,9 @@ int main(int argc, char** argv) {
   for (int li = 0; li < frames; li++) {
     int f = (g_frame >= 0) ? g_frame : li;  // --frame N renders orbit index N
     CamUniform u = ro0;
-    // orbit: rotate (ro-ta) around Y; f=0 matches the CPU camera exactly
-    double th = 2.0 * 3.141592653589793 * (double)f / (double)totalRef;
+    // slow pan: rotate (ro-ta) around Y by a total of 60 deg across the
+    // clip; f=0 matches the still camera exactly
+    double th = (3.141592653589793 / 3.0) * (double)f / (double)totalRef;
     float cx = 2.53f, cz = 2.33f;
     float rx = cx * (float)cos(th) - cz * (float)sin(th);
     float rz = cx * (float)sin(th) + cz * (float)cos(th);

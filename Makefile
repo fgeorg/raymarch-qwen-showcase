@@ -3,7 +3,8 @@
 #   make            build the GPU (Vulkan compute) renderer  + CPU fallback
 #   make run        render one 1024^2 frame -> out/render.png  (GPU, timed with
 #                   VK_QUERY_TYPE_TIMESTAMP; falls back to CPU if no Vulkan)
-#   make video      300-frame orbit -> out/frames/%04d.png -> out/showcase.mp4
+#   make video      150-frame clip (10 s @ 15 fps): 60-deg camera pan + goo
+#                   motion -> out/frames/%04d.png -> out/showcase.mp4
 #   make cpu        build the CPU raymarcher only
 #   make clean      remove build artifacts
 #
@@ -57,8 +58,8 @@ run: $(BIN_GPU) $(BIN_CPU)
 
 video: $(BIN_GPU)
 	mkdir -p out/frames
-	$(GPU_ENV) ./$(BIN_GPU) --frames 300 --out out/frames
-	ffmpeg -y -framerate 30 -i out/frames/%04d.png -c:v libx264 -pix_fmt yuv420p out/showcase.mp4
+	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --out out/frames
+	ffmpeg -y -framerate 15 -i out/frames/%04d.png -c:v libx264 -pix_fmt yuv420p out/showcase.mp4
 
 cpu: $(BIN_CPU)
 	./$(BIN_CPU)
