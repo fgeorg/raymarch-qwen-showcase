@@ -80,18 +80,24 @@ float sdTorus(vec3 p, float R, float r) {
 }
 
 // --- scene ------------------------------------------------------------------
-// smoothmin showcase: core sphere + a torus ring melted around it + three
-// satellite spheres (two orbiting), all one fused "goo" material.
+// smoothmin showcase: core sphere + a torus ring melted around it + five
+// satellite spheres (four orbiting), all one fused "goo" material.
 // boolean showcase: a soft difference (sdiff) carves a bowl into the top;
 // a hard-unioned gold sphere sits inside the bowl.
-vec3  g_b1, g_b2;
+vec3  g_b1, g_b2, g_b3, g_b4;
 float g_cutR;
 
 void initMorph(float tm) {
   float a1 = 0.75 + 0.25 * sin(0.45 * tm);
   float a2 = 1.80 + 0.25 * sin(0.38 * tm + 1.0);
+  // b3/b4 sweep the back side of the goo (az ~195-290 deg) so they never
+  // crowd the camera-facing arc; phases spread to avoid synced motion
+  float a3 = 3.85 + 0.45 * sin(0.35 * tm + 2.3);
+  float a4 = 5.05 + 0.40 * sin(0.30 * tm + 4.4);
   g_b1   = vec3(0.72 * cos(a1), 0.50 + 0.08 * sin(0.80 * tm + 0.5), 0.72 * sin(a1));
   g_b2   = vec3(-0.66 * cos(a2), 0.48 + 0.10 * sin(0.70 * tm + 1.4), -0.66 * sin(a2));
+  g_b3   = vec3(0.55 * cos(a3), 0.44 + 0.09 * sin(0.62 * tm + 0.7), 0.55 * sin(a3));
+  g_b4   = vec3(0.50 * cos(a4), 0.58 + 0.07 * sin(0.55 * tm + 2.6), -0.50 * sin(a4));
   g_cutR = 0.72 + 0.05 * sin(0.50 * tm + 0.2);
 }
 
@@ -103,8 +109,11 @@ vec2 map(vec3 p) {
   float dS1   = sdSphere(p - g_b1, 0.34);
   float dS2   = sdSphere(p - g_b2, 0.32);
   float dS3   = sdSphere(p - vec3(-0.63, 0.50 + 0.05 * sin(0.0275 * cam.time + 2.0), 0.19), 0.30);
+  float dS4   = sdSphere(p - g_b3, 0.26);
+  float dS5   = sdSphere(p - g_b4, 0.23);
   float goo = smin(smin(dCore, dRing, 0.24), dS1, 0.20);
   goo = smin(smin(goo, dS2, 0.20), dS3, 0.20);
+  goo = smin(smin(goo, dS4, 0.20), dS5, 0.20);
 
   // soft boolean: carve a wide shallow bowl into the top
   float dCut   = sdSphere(p - vec3(0.0, 1.40, 0.0), g_cutR);

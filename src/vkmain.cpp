@@ -274,17 +274,21 @@ int main(int argc, char** argv) {
   // --- render loop ----------------------------------------------------------
   const CamUniform ro0 = {{1.92f, 1.02f, 1.78f}, 0.f, {0.00f, 0.78f, 0.00f}, 1.90f, (float)RES, 0.f, 0.f, 1.0f};
   double totalMs = 0;
-  int totalRef = (frames > 1) ? frames : 300;  // orbit denominator
   for (int li = 0; li < frames; li++) {
     int f = (g_frame >= 0) ? g_frame : li;  // --frame N renders orbit index N
     CamUniform u = ro0;
-    // slow pan: rotate (ro-ta) around Y by a total of 60 deg across the
-    // clip; f=0 matches the still camera exactly
-    double th = (3.141592653589793 / 3.0) * (double)f / (double)totalRef;
-    float cx = 2.53f, cz = 2.33f;
-    float rx = cx * (float)cos(th) - cz * (float)sin(th);
-    float rz = cx * (float)sin(th) + cz * (float)cos(th);
-    u.ro[0] = 0.02f + rx; u.ro[1] = 1.30f; u.ro[2] = 0.02f + rz;
+    // camera move across the clip: starts high and far, looking down at
+    // the subject; pans 60 deg while dollying in and dropping to a low
+    // angle. All terms share one smoothstep ease (slow start/end).
+    double p = (frames > 1) ? (double)f / (double)(frames - 1) : 0.0;
+    double e = p * p * (3.0 - 2.0 * p);
+    const double th0 = atan2(2.33, 2.53);  // same start bearing as the old pan
+    double th = th0 + (3.141592653589793 / 3.0) * e;   // 60 deg pan
+    double R = 4.40 + (2.80 - 4.40) * e;               // far  -> close
+    double H = 2.90 + (1.00 - 2.90) * e;               // high -> low
+    u.ro[0] = 0.02f + (float)(R * cos(th));
+    u.ro[1] = (float)H;
+    u.ro[2] = 0.02f + (float)(R * sin(th));
     u.time = (float)f;
     u.seed = (float)f * 101.0f;
     u.fuzz = g_fuzz;
