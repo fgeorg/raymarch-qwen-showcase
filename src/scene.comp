@@ -203,11 +203,17 @@ vec3 skyRay(vec3 rd) {
 }
 
 // --- materials ---------------------------------------------------------------
-vec3 getAlbedo(float id) {
+// Floor: subtle world-space XZ checker (0.25u cells) to ground camera movement.
+// Two-tone stays close to the base albedo (it doubles as the semi-metal F0), and
+// fades back to plain albedo past ~5-12u so the pattern doesn't moire into the horizon.
+vec3 getAlbedo(float id, vec3 p) {
   if (id < 1.5) return vec3(0.80, 0.85, 0.95);   // goo (light dielectric)
   if (id < 2.5) return vec3(0.80, 0.85, 0.95);   // bowl interior (carved goo)
   if (id < 3.5) return vec3(1.00, 0.62, 0.26);   // gold
-  return vec3(0.50, 0.47, 0.44);                 // floor
+  float ch = mod(floor(p.x * 4.0) + floor(p.z * 4.0), 2.0);
+  vec3 checker = mix(vec3(0.33, 0.315, 0.30), vec3(0.55, 0.52, 0.50), ch);
+  float fade = 1.0 - smoothstep(5.0, 12.0, length(p.xz));
+  return mix(vec3(0.50, 0.47, 0.44), checker, fade);
 }
 float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.05); }  // goo: mostly diffuse + light fresnel
 // --fuzz scales the uniform-fuzz radius (0.5 crisp .. 2.0 blurry)
@@ -274,7 +280,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, float rnd, float s) {
     vec3 N = (id > 3.5) ? vec3(0.0, 1.0, 0.0) : calcNormal(pos);
     float metal = getMetal(id);
     float rough = getRough(id);
-    vec3  alb   = getAlbedo(id);
+    vec3  alb   = getAlbedo(id, pos);
     vec3  F0    = getF0(alb, metal);
     vec3  off   = offsetSurf(pos, N);
 
