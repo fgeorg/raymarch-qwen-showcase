@@ -189,7 +189,7 @@ vec3 skyRay(vec3 rd) {
   // visible in floor reflections just below the horizon)
   vec3 sd = normalize(vec3(-0.82, 0.16, -0.56));
   float ss = max(dot(rd, sd), 0.0);
-  col += vec3(1.40, 0.88, 0.52) * (pow(ss, 900.0) * 8.0 + pow(ss, 24.0) * 0.22);
+  col += vec3(1.40, 0.88, 0.52) * (pow(ss, 500.0) * 5.0 + pow(ss, 24.0) * 0.22);
   return col;
 }
 
@@ -207,7 +207,7 @@ float getRough(float id) {
   if (id < 1.5)      base = 0.28;
   else if (id < 2.5) base = 0.35;
   else if (id < 3.5) base = 0.38;
-  else               base = 0.19;
+  else               base = 0.25;
   return clamp(base * cam.fuzz, 0.03, 1.0);
 }
 vec3 getF0(vec3 alb, float metal) { return mix(vec3(0.02), alb, metal); }
