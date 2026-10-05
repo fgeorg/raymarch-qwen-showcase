@@ -20,8 +20,7 @@
 
 #include "png.h"
 
-#define RES 1024
-
+static int   g_res = 1024;  // --res N: frame size in px (must be divisible by 32)
 static float g_fuzz = 1.0f;
 static int   g_frame = -1;
 
@@ -54,9 +53,11 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) outDir = argv[++i];
+    else if (!strcmp(argv[i], "--res") && i + 1 < argc) g_res = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--fuzz") && i + 1 < argc) g_fuzz = atof(argv[++i]);
     else if (!strcmp(argv[i], "--frame") && i + 1 < argc) g_frame = atoi(argv[++i]);
   }
+  if (g_res % 32 != 0) { fprintf(stderr, "--res must be divisible by 32\n"); return 1; }
 
   // --- instance -----------------------------------------------------------
   VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -160,7 +161,7 @@ int main(int argc, char** argv) {
     return 0;
   };
 
-  const VkDeviceSize imgBytes = (VkDeviceSize)RES * RES * 4 * 4;
+  const VkDeviceSize imgBytes = (VkDeviceSize)g_res * g_res * 4 * 4;
   VkBuffer imgBuf;
   VkDeviceMemory imgMem;
   bool imgHostVisible;
@@ -272,23 +273,23 @@ int main(int argc, char** argv) {
   VK_CHECK(vkCreateFence(dev, &fc, nullptr, &fence));
 
   // --- render loop ----------------------------------------------------------
-  const CamUniform ro0 = {{1.92f, 1.02f, 1.78f}, 0.f, {0.00f, 0.78f, 0.00f}, 1.90f, (float)RES, 0.f, 0.f, 1.0f};
+  const CamUniform ro0 = {{1.92f, 1.02f, 1.78f}, 0.f, {0.00f, 0.78f, 0.00f}, 1.90f, (float)g_res, 0.f, 0.f, 1.0f};
   double totalMs = 0;
   for (int li = 0; li < frames; li++) {
     int f = (g_frame >= 0) ? g_frame : li;  // --frame N renders orbit index N
     CamUniform u = ro0;
-    // camera move across the clip: starts high and far, looking down at
-    // the subject; pans ~20 deg to the right (toward the sun) so the
-    // sun's floor reflection stays framed, while dollying in and
-    // dropping to a low angle. p = progress across the canonical
-    // 150-frame clip, so `--frames 1 --frame N` previews the exact
-    // video-frame camera. All terms share one smoothstep ease.
+    // camera move across the clip: starts high overhead looking down at
+    // the subject, drops to a level shot aimed at it with the sun in the
+    // background (end bearing matches sunDir()'s azimuth). p = progress
+    // across the canonical 150-frame clip, so `--frames 1 --frame N`
+    // previews the exact video-frame camera. All terms share one
+    // smoothstep ease.
     double p = (double)f / (double)149.0;
     double e = p * p * (3.0 - 2.0 * p);
-    const double th0 = atan2(2.33, 2.53);  // same start bearing as the old pan
-    double th = th0 - (20.0 * 3.141592653589793 / 180.0) * e;   // ~20 deg pan, toward the sun
-    double R = 4.40 + (2.80 - 4.40) * e;               // far  -> close
-    double H = 2.90 + (1.00 - 2.90) * e;               // high -> low
+    const double sunAz = atan2(0.56, 0.82);  // = atan2(-sd.z, -sd.x) of sunDir()
+    double th = sunAz + (14.0 * 3.141592653589793 / 180.0) * (1.0 - e);
+    double R = 2.60 + (3.20 - 2.60) * e;               // horizontal dist (slight dolly in)
+    double H = 3.30 + (0.92 - 3.30) * e;               // high -> level
     u.ro[0] = 0.02f + (float)(R * cos(th));
     u.ro[1] = (float)H;
     u.ro[2] = 0.02f + (float)(R * sin(th));
@@ -304,7 +305,7 @@ int main(int argc, char** argv) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &dset, 0, nullptr);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, qpool, 0);
-    vkCmdDispatch(cmd, RES / 32, RES / 32, 1);
+    vkCmdDispatch(cmd, g_res / 32, g_res / 32, 1);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, qpool, 1);
     if (!imgHostVisible) {
       VkBufferCopy r = {0, 0, imgBytes};
@@ -336,10 +337,10 @@ int main(int argc, char** argv) {
     // Shader stores linear floats in 0..1 (vec4 per pixel); convert host-side
     // to 16-bit (0..65535) — passing the raw float bits to writePng16 would be
     // garbage.
-    std::vector<uint16_t> u16px((size_t)RES * RES * 4);
+    std::vector<uint16_t> u16px((size_t)g_res * g_res * 4);
     {
       const float* fv = (const float*)px;
-      for (size_t i = 0; i < (size_t)RES * RES; i++) {
+      for (size_t i = 0; i < (size_t)g_res * g_res; i++) {
         for (int c = 0; c < 3; c++) {
           float v = fv[i * 4 + c];
           v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
@@ -351,7 +352,7 @@ int main(int argc, char** argv) {
     char path[512];
     if (frames == 1) snprintf(path, sizeof(path), "%s/render.png", outDir.c_str());
     else snprintf(path, sizeof(path), "%s/%04d.png", outDir.c_str(), f);
-    if (!writePng16(path, RES, RES, u16px.data())) {
+    if (!writePng16(path, g_res, g_res, u16px.data())) {
       fprintf(stderr, "writePng16 failed: %s\n", path);
       return 1;
     }

@@ -3,9 +3,10 @@
 #   make            build the GPU (Vulkan compute) renderer
 #   make run        render one 1024^2 frame -> out/render.png (GPU, timed with
 #                   VK_QUERY_TYPE_TIMESTAMP)
-#   make video      150-frame clip (10 s @ 15 fps): ~20-deg camera pan + dolly
-#                   and goo motion -> out/showcase.mp4 (frames are intermediate
-#                   and deleted after encoding; `make frames` keeps them)
+#   make video      150-frame clip (10 s @ 15 fps): camera drops from
+#                   overhead to a level, sun-backlit shot -> out/showcase.mp4
+#                   (frames are intermediate and deleted after encoding;
+#                   `make frames` keeps them; `make video RES=512` for 512 res)
 #   make preview    512px-wide 8-bit JPEG of a big PNG for cheap visual
 #                   inspection -> out/preview.jpg (`make preview IMG=...`)
 #   make frames     render the 150 clip frames to out/frames (no encoding)
@@ -25,6 +26,7 @@ CXXFLAGS ?= -std=c++17 -O3 -march=native -flto -Wall -Wextra -Wno-missing-field-
 GLSLANG  ?= glslangValidator
 GPU_FLAGS ?=
 FZZ     ?= 1.0   # runtime fuzz: make run FZZ=2 (0.5 crisp .. 2.0 fuzzy)
+RES     ?= 1024  # frame size for clip frames: make video RES=512
 LDLIBS   := -lz -lpthread
 
 BIN_GPU  := build/vkmain
@@ -57,11 +59,11 @@ run: $(BIN_GPU)
 # Render the clip frames and keep them (no encode)
 frames: $(BIN_GPU)
 	mkdir -p out/frames
-	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --out out/frames
+	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --res $(RES) --out out/frames
 
 video: $(BIN_GPU)
 	mkdir -p out/frames
-	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --out out/frames
+	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --res $(RES) --out out/frames
 	ffmpeg -y -framerate 15 -i out/frames/%04d.png -c:v libx264 -pix_fmt yuv420p out/showcase.mp4
 	rm -rf out/frames
 
