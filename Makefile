@@ -10,6 +10,8 @@
 #   make preview    512px-wide 8-bit JPEG of a big PNG for cheap visual
 #                   inspection -> out/preview.jpg (`make preview IMG=...`)
 #   make frames     render the 150 clip frames to out/frames (no encoding)
+#   make diff       100%-diffuse debug render of frame 100 -> out/diff.png
+#                   (all materials forced Lambert; banding triage)
 #   make clean      remove build artifacts
 #
 # Quality knobs are #defines in src/scene.comp, e.g.:
@@ -32,7 +34,7 @@ LDLIBS   := -lz -lpthread
 BIN_GPU  := build/vkmain
 SPV      := build/scene.spv
 
-.PHONY: all run video frames preview diag clean
+.PHONY: all run video frames preview diag diff flatsky flatfloor flatboth hisamp normview mirrorview frame100 clean
 all: $(BIN_GPU)
 
 # GPU_FLAGS must trigger an SPV rebuild even when scene.comp is untouched
@@ -78,6 +80,50 @@ preview:
 # (48 samples), right half = exact mirror; CPU checker validates both
 # against analytic ground truth. Clobbers out/render.png (make run restores it).
 diag: GPU_FLAGS=-DDIAG -DAA_SAMPLES=16
+# DIFF: additive debug pass (no changes to main scene behavior). Renders
+# frame 100 with -DDIFF: every material forced to 100% diffuse, so any
+# banding that survives is in the diffuse sky integration / tonemap, not
+# the specular BSDF. Clobbers out/render.png (make run restores it).
+diff: GPU_FLAGS=-DDIFF
+diff: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/diff.png
+
+# Banding triage renders (frame 100, each clobbers out/render.png; make run
+# restores it):
+#   flatsky   -DFLATSKY        uniform sky -> isolates sky-gradient banding
+#   flatfloor -DFLATFLOOR      no checker  -> isolates checker moire in gloss
+#   flatboth  both flat        clean -> sky+floor cause; banded -> BSDF/surface
+#   hisamp    -DAA_SAMPLES=512 band amplitude drops -> variance; unchanged ->
+#                              deterministic (precision/quantization)
+flatsky: GPU_FLAGS=-DFLATSKY
+flatsky: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatsky.png
+flatfloor: GPU_FLAGS=-DFLATFLOOR
+flatfloor: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatfloor.png
+flatboth: GPU_FLAGS=-DFLATSKY -DFLATFLOOR
+flatboth: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatboth.png
+hisamp: GPU_FLAGS=-DAA_SAMPLES=512
+hisamp: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/hisamp.png
+
+# Sampling-vs-geometry triage (frame 100, single center ray per pixel, no AA
+# loop; each clobbers out/render.png; make run restores it):
+#   normview    -DNORMVIEW     first-hit normal per pixel (sky black); rings
+#                              here => SDF/normal quantization, not sampling
+#   mirrorview  -DMIRRORVIEW   fuzzReflect direction at u=0.5 per pixel
+normview: GPU_FLAGS=-DNORMVIEW
+normview: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/normview.png
+mirrorview: GPU_FLAGS=-DMIRRORVIEW
+mirrorview: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/mirrorview.png
+
+# Production render of one clip frame (default AA, no debug defines):
+#   make frame100 -> out/frame100.png (banding baseline is frame 100)
+frame100: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/frame100.png
 diag: $(BIN_GPU)
 	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/diag_100.png
 	$(GPU_ENV) ./$(BIN_GPU) --frame 149 --out out && mv out/render.png out/diag_149.png

@@ -199,6 +199,11 @@ vec3 sunDir() { return normalize(vec3(-0.82, 0.16, -0.56)); }
 // horizon color so specular reflections melt into the horizon line instead
 // of painting a fake dark band.
 vec3 skyRay(vec3 rd) {
+#ifdef FLATSKY
+  // Debug: uniform sky (no gradient, warm band, or sun lobe) to test the
+  // sky-side banding contribution on glossy surfaces.
+  return vec3(0.5);
+#else
   float y = rd.y;
   vec2 hz = rd.xz;
   float hl = max(length(hz), 1e-4);
@@ -218,6 +223,7 @@ vec3 skyRay(vec3 rd) {
   float ss = max(dot(rd, sd), 0.0);
   col += vec3(1.40, 0.88, 0.52) * (pow(ss, 500.0) * 5.0 + pow(ss, 24.0) * 0.22);
   return col;
+#endif
 }
 
 // --- materials ---------------------------------------------------------------
@@ -227,12 +233,24 @@ vec3 skyRay(vec3 rd) {
 vec3 getAlbedo(float id, vec3 p) {
   if (id < 2.5) return vec3(0.80, 0.85, 0.95);   // goo + bowl interior (carved goo)
   if (id < 3.5) return vec3(1.00, 0.62, 0.26);   // gold
+#ifdef FLATFLOOR
+  // Debug: flat floor albedo (no checker) to test whether the checkerboard
+  // drives the banding in grazing-angle glossy reflections.
+  return vec3(0.50, 0.47, 0.44);
+#else
   float ch = mod(floor(p.x * (4.0 / 3.0)) + floor(p.z * (4.0 / 3.0)), 2.0);
   vec3 checker = mix(vec3(0.33, 0.315, 0.30), vec3(0.55, 0.52, 0.50), ch);
   float fade = 1.0 - smoothstep(15.0, 36.0, length(p.xz));
   return mix(vec3(0.50, 0.47, 0.44), checker, fade);
+#endif
 }
+#ifdef DIFF
+// Debug: force every material to 100% diffuse (Lambert only, no specular
+// branch) to isolate banding between BSDF sampling and sky/tonemap.
+float getMetal(float id) { return 0.0; }
+#else
 float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.05); }  // goo: mostly diffuse + light fresnel
+#endif
 // --fuzz scales the uniform-fuzz radius (0.5 crisp .. 2.0 blurry)
 float getRough(float id) {
   float base;
@@ -254,11 +272,16 @@ vec3 frameT(vec3 N) {
 
 // Stratified sample for path `s` (0..AA-1) at bounce `b`, dimension `dim`:
 // the pixel's AA paths each take a different cell of [0,1). The cell
-// permutation (s*K+off) mod AA uses a different odd slope per dimension, so
-// the 4 dims land on a Latin hypercube instead of a shared diagonal; a
-// 24-bit integer hash (per pixel/path/bounce/dim) fills each cell.
+// permutation (s*Kp+off) mod AA is a rank-1 line in 2-D cell space; its
+// slope is per-pixel (hash-perturbed, kept odd so each dim stays a Latin
+// hypercube). A footprint straddling a radiance discontinuity then gets a
+// per-pixel *unstructured* count bias (fine grain, buried under the
+// 1/sqrt(S) noise) instead of the identical bias at every pixel (the
+// coherent concentric banding a shared slope produced). A 24-bit integer
+// hash (per pixel/path/bounce/dim) fills each cell.
 float strat(int s, int b, int dim, int K, int off, int pix, int seed) {
-  int cell = int(mod(s * K + off, AA_SAMPLES));
+  int Kp = K + 2 * int(hash31i(pix, K * 17 + off, seed) * 8.0);
+  int cell = int(mod(s * Kp + off, AA_SAMPLES));
   float j = hash31i(pix, s * 24 + b * 4 + dim, seed);
   return (float(cell) + j) / float(AA_SAMPLES);
 }
@@ -363,6 +386,32 @@ void main() {
 
   int pix = px.x + px.y * IMW;
   int seed = int(cam.seed);  // frame-seeded; hash31i decorrelates per pixel
+  vec3 col;
+#ifdef NORMVIEW
+  // Debug: first-hit surface normal per pixel (sky = black). No sampling,
+  // so any banding here is SDF/normal structure, not the estimator.
+  {
+    float pxu = (2.0 * (float(px.x) + 0.5) - res) / res;
+    float pyu = (res - 2.0 * (float(px.y) + 0.5)) / res;
+    vec3 rd = normalize(fw * cam.focal + rt * pxu + up * pyu);
+    float id; vec3 pos = trace(ro, rd, id, 40.0);
+    vec3 N = (id > 3.5) ? vec3(0, 1, 0) : calcNormal(pos);
+    col = (id > -1.0) ? N * 0.5 + 0.5 : vec3(0.0);
+  }
+#elif defined(MIRRORVIEW)
+  // Debug: uniform-fuzz BSDF direction at u = 0.5 per pixel. Banding here =
+  // BSDF/normal structure, not sampling.
+  {
+    float pxu = (2.0 * (float(px.x) + 0.5) - res) / res;
+    float pyu = (res - 2.0 * (float(px.y) + 0.5)) / res;
+    vec3 rd = normalize(fw * cam.focal + rt * pxu + up * pyu);
+    float id; vec3 pos = trace(ro, rd, id, 40.0);
+    if (id > -1.0) {
+      vec3 N = (id > 3.5) ? vec3(0, 1, 0) : calcNormal(pos);
+      col = fuzzReflect(reflectDir(rd, N), N, getRough(id), 0.5, 0.5, 0.5) * 0.5 + 0.5;
+    } else col = vec3(0.0);
+  }
+#else
   const int AAc = (AA_SAMPLES <= 4) ? 2 : 3;
   const int AAr = (AA_SAMPLES + AAc - 1) / AAc;
   vec3 acc = vec3(0.0);
@@ -375,10 +424,11 @@ void main() {
     acc += pathTrace(ro, rd, pix, seed, s);
   }
 
-  vec3 col = acc * (1.0 / float(AA_SAMPLES)) * 0.96;  // exposure
+  col = acc * (1.0 / float(AA_SAMPLES)) * 0.96;  // exposure
   col = vec3(softKneeC(col.x, 2.5), softKneeC(col.y, 2.5), softKneeC(col.z, 2.5));
   col = vec3(acesComp(col.x * 1.02), acesComp(col.y * 1.02), acesComp(col.z * 1.02));
   col = pow(col, vec3(0.92));
+#endif
 
   float uvx = (2.0 * (float(px.x) + 0.5) - res) / res;
   float uvy = (res - 2.0 * (float(px.y) + 0.5)) / res;
