@@ -252,18 +252,23 @@ vec3 getAlbedo(float id, vec3 p) {
 // branch) to isolate banding between BSDF sampling and sky/tonemap.
 float getMetal(float id) { return 0.0; }
 #else
-float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.45); }  // goo: glossy — strong specular
+float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.45); }  // goo: glossy plastic — strong specular
 #endif
 // --fuzz scales the uniform-fuzz radius (0.5 crisp .. 2.0 blurry)
 float getRough(float id) {
   float base;
-  if (id < 1.5)      base = 0.28;
-  else if (id < 2.5) base = 0.35;
+  if (id < 1.5)      base = 0.16;
+  else if (id < 2.5) base = 0.22;  // plastic: tight, glossy
   else if (id < 3.5) base = 0.38;
   else               base = 0.25;
   return clamp(base * cam.fuzz, 0.03, 1.0);
 }
-vec3 getF0(vec3 alb, float metal) { return mix(vec3(0.02), alb, metal); }
+// Goo is a dielectric (plastic): a low, neutral F0 keeps the highlight
+// white instead of albedo-tinted (a tinted highlight reads as metal).
+vec3 getF0(vec3 alb, float id) {
+  if (id < 2.5) return vec3(0.04);
+  return mix(vec3(0.02), alb, getMetal(id));
+}
 
 // --- BSDF sampling -----------------------------------------------------------
 vec3 reflectDir(vec3 I, vec3 N) { return I - N * (2.0 * dot(I, N)); }
@@ -327,7 +332,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, int pix, int seed, int s) {
     float metal = getMetal(id);
     float rough = getRough(id);
     vec3  alb   = getAlbedo(id, pos);
-    vec3  F0    = getF0(alb, metal);
+    vec3  F0    = getF0(alb, id);
     vec3  off   = offsetSurf(pos, N);
 
     float uS = strat(s, b, 0, 1,  1, pix, seed);
