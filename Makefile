@@ -3,8 +3,9 @@
 #   make            build the GPU (Vulkan compute) renderer
 #   make run        render one 1024^2 frame -> out/render.png (GPU, timed with
 #                   VK_QUERY_TYPE_TIMESTAMP)
-#   make video      150-frame clip (10 s @ 15 fps): camera drops from
-#                   overhead to a level, sun-backlit shot -> out/showcase.mp4
+#   make video      150-frame clip (10 s @ 15 fps): 7 s camera pan drops from
+#                   overhead to a level, sun-backlit shot, then holds the
+#                   final pose for the last 3 s -> out/showcase.mp4
 #                   (frames are intermediate and deleted after encoding;
 #                   `make frames` keeps them; `make video RES=512` for 512 res)
 #   make preview    512px-wide 8-bit JPEG of a big PNG for cheap visual

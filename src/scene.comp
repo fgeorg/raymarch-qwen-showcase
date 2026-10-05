@@ -197,7 +197,9 @@ vec3 sunDir() { return normalize(vec3(-0.82, 0.16, -0.56)); }
 // Dusk-like gradient environment: cool blue zenith, bright horizon with a
 // warm peach side fading to cool slate. Below the horizon we hold the
 // horizon color so specular reflections melt into the horizon line instead
-// of painting a fake dark band.
+// of painting a fake dark band. SKY_GAIN brightens the whole gradient
+// (the sun lobe is applied on top and stays as-is).
+const float SKY_GAIN = 1.6;
 vec3 skyRay(vec3 rd) {
 #ifdef FLATSKY
   // Debug: uniform sky (no gradient, warm band, or sun lobe) to test the
@@ -217,6 +219,7 @@ vec3 skyRay(vec3 rd) {
     float g = smoothstep(0.0, -0.25, y);
     col = mix(col, hor, g);
   }
+  col *= SKY_GAIN;
   // soft low sun, left of frame: warm key light on the subject bright core + wide warm glow (also
   // visible in floor reflections just below the horizon)
   vec3 sd = sunDir();
@@ -249,7 +252,7 @@ vec3 getAlbedo(float id, vec3 p) {
 // branch) to isolate banding between BSDF sampling and sky/tonemap.
 float getMetal(float id) { return 0.0; }
 #else
-float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.05); }  // goo: mostly diffuse + light fresnel
+float getMetal(float id) { return (id > 3.5) ? 0.55 : ((id > 2.5) ? 0.92 : 0.45); }  // goo: glossy — strong specular
 #endif
 // --fuzz scales the uniform-fuzz radius (0.5 crisp .. 2.0 blurry)
 float getRough(float id) {
