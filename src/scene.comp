@@ -67,6 +67,15 @@ float hash21i(int x, int y) {
   return float(n & 0x7fffffffu) * (1.0 / 2147483648.0);
 }
 
+// 3-key integer hash, full 32-bit avalanche (float-precise sin hashes have
+// only ~8-9 usable bits and correlate with integer-ish inputs).
+float hash31i(int a, int b, int c) {
+  uint n = uint(a) * 1973u + uint(b) * 9277u + uint(c) * 12345u + 777u;
+  n = (n << 13u) ^ n;
+  n = n * (n * n * 15731u + 789221u) + 1376312589u;
+  return float(n & 0x7fffffffu) * (1.0 / 2147483648.0);
+}
+
 float smin(float a, float b, float k) {
   float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
   return mix(b, a, h) - k * h * (1.0 - h);
@@ -102,6 +111,11 @@ void initMorph(float tm) {
 }
 
 // id: 1=goo 2=bowl interior (carved goo) 3=gold 4=floor
+#ifdef FLOOR_ONLY
+// floor-only diagnostic: skip all SDF subject (reflection tests isolate the
+// floor BSDF + sampling). Additive define: no change to default behavior.
+vec2 map(vec3 p) { return vec2(p.y, 4.0); }
+#else
 vec2 map(vec3 p) {
   vec3 c0 = vec3(0.0, 0.62, 0.0);
   float dCore = sdSphere(p - c0, 0.60);
@@ -127,6 +141,7 @@ vec2 map(vec3 p) {
   if (p.y < d)   { d = p.y;   id = 4.0; }
   return vec2(d, id);
 }
+#endif
 
 vec3 trace(vec3 ro, vec3 rd, out float id, float maxT) {
   // analytic floor hit first: it is a valid surface everywhere, so it
@@ -176,6 +191,9 @@ vec3 offsetSurf(vec3 p, vec3 N) {
   return p + N * (t + 0.002);
 }
 
+// single source of truth for the sun direction (shared by skyRay and DIAG overlays)
+vec3 sunDir() { return normalize(vec3(-0.82, 0.16, -0.56)); }
+
 // --- sky: the only light in the scene ---------------------------------------
 // Dusk-like gradient environment: cool blue zenith, bright horizon with a
 // warm peach side fading to cool slate. Below the horizon we hold the
@@ -185,7 +203,8 @@ vec3 skyRay(vec3 rd) {
   float y = rd.y;
   vec2 hz = rd.xz;
   float hl = max(length(hz), 1e-4);
-  float warm = pow(clamp(dot(hz / hl, vec2(-0.73, -0.68)), 0.0, 1.0), 1.3);
+  vec2 warmDir = normalize(sunDir().xz);  // warm band tracks sun azimuth (single source of truth)
+  float warm = pow(clamp(dot(hz / hl, warmDir), 0.0, 1.0), 1.3);
   vec3 zen = vec3(0.22, 0.38, 0.74);
   vec3 hor = mix(vec3(0.52, 0.60, 0.78), vec3(1.55, 0.86, 0.45), warm);
   float m = pow(clamp(1.0 - max(y, 0.0), 0.0, 1.0), 2.8);
@@ -196,7 +215,7 @@ vec3 skyRay(vec3 rd) {
   }
   // soft low sun, left of frame: warm key light on the subject bright core + wide warm glow (also
   // visible in floor reflections just below the horizon)
-  vec3 sd = normalize(vec3(-0.82, 0.16, -0.56));
+  vec3 sd = sunDir();
   float ss = max(dot(rd, sd), 0.0);
   col += vec3(1.40, 0.88, 0.52) * (pow(ss, 500.0) * 5.0 + pow(ss, 24.0) * 0.22);
   return col;
@@ -234,12 +253,15 @@ vec3 frameT(vec3 N) {
   return normalize(cross(up, N));
 }
 
-// Stratified sample for path `s` (0..AA-1) at bounce `b`: the pixel's AA
-// paths each take a different cell of [0,1) (rotated per bounce so the same
-// path does not reuse a cell), and a per-pixel jitter fills the cell.
-float strat(float s, int off, float rnd, float mul) {
-  int cell = int(mod(s + float(off), float(AA_SAMPLES)));
-  return (float(cell) + fract(rnd * mul)) / float(AA_SAMPLES);
+// Stratified sample for path `s` (0..AA-1) at bounce `b`, dimension `dim`:
+// the pixel's AA paths each take a different cell of [0,1). The cell
+// permutation (s*K+off) mod AA uses a different odd slope per dimension, so
+// the 4 dims land on a Latin hypercube instead of a shared diagonal; a
+// 24-bit integer hash (per pixel/path/bounce/dim) fills each cell.
+float strat(int s, int b, int dim, int K, int off, int pix, int seed) {
+  int cell = int(mod(s * K + off, AA_SAMPLES));
+  float j = hash31i(pix, s * 24 + b * 4 + dim, seed);
+  return (float(cell) + j) / float(AA_SAMPLES);
 }
 
 // Uniform-fuzz specular (a la wendelich): mirror direction perturbed by a
@@ -267,7 +289,7 @@ vec3 hemiSample(vec3 N, float u1, float u2) {
 // Sky (with its soft sun lobe) is the only emitter: no NEE, no shadow rays. Each bounce is a
 // BSDF sample; the path ends in the sky (its radiance is the contribution)
 // or is killed by Russian roulette.
-vec3 pathTrace(vec3 ro, vec3 rd, float rnd, float s) {
+vec3 pathTrace(vec3 ro, vec3 rd, int pix, int seed, int s) {
   vec3 col = vec3(0.0);
   vec3 T = vec3(1.0);
   for (int b = 0; b < MAX_BOUNCES; b++) {
@@ -283,10 +305,10 @@ vec3 pathTrace(vec3 ro, vec3 rd, float rnd, float s) {
     vec3  F0    = getF0(alb, metal);
     vec3  off   = offsetSurf(pos, N);
 
-    float uS = strat(s, b * 5 + 1, rnd, 12.9898);
-    float u1 = strat(s, b * 5 + 2, rnd, 78.2330);
-    float u2 = strat(s, b * 5 + 3, rnd, 37.7194);
-    float u3 = strat(s, b * 5 + 4, rnd, 11.1357);
+    float uS = strat(s, b, 0, 1,  1, pix, seed);
+    float u1 = strat(s, b, 1, 21, 2, pix, seed);
+    float u2 = strat(s, b, 2, 43, 3, pix, seed);
+    float u3 = strat(s, b, 3, 73, 4, pix, seed);
 
     if (uS < clamp(metal, 0.0, 1.0)) {
       // specular: uniform fuzz around the mirror direction
@@ -302,7 +324,7 @@ vec3 pathTrace(vec3 ro, vec3 rd, float rnd, float s) {
     // Russian roulette after bounce 2
     if (b >= 2) {
       float q = max(max(T.x, T.y), T.z);
-      if (hash21(rnd + b * 3.1, 7.7) > q) break;
+      if (hash31i(pix, s * 13 + b, seed + 7) > q) break;
       T /= max(q, 1e-4);
     }
     ro = off;
@@ -317,7 +339,18 @@ float softKneeC(float x, float knee) {
   return (x <= knee) ? x : knee + (x - knee) / (1.0 + 2.0 * (x - knee));
 }
 
+// DIAG validation pass (make diag): its code lives in src/diag.inc,
+// included here so the production shader stays lean.
+#ifdef DIAG
+#extension GL_GOOGLE_include_directive : require
+#include "diag.inc"
+#endif
+
 void main() {
+#ifdef DIAG
+  diagMain();
+  return;
+#else
   ivec2 px = ivec2(gl_GlobalInvocationID.xy);
 
   initMorph(0.20 * cam.time);
@@ -328,18 +361,18 @@ void main() {
   vec3 up = cross(rt, fw);
   float res = cam.res;
 
-  float baseRnd = cam.seed + hash21i(int(px.x), int(px.y)) * 43758.5453;
+  int pix = px.x + px.y * 1024;
+  int seed = int(cam.seed);  // frame-seeded; hash31i decorrelates per pixel
   const int AAc = (AA_SAMPLES <= 4) ? 2 : 3;
   const int AAr = (AA_SAMPLES + AAc - 1) / AAc;
   vec3 acc = vec3(0.0);
   for (int s = 0; s < AA_SAMPLES; s++) {
-    vec2 sub = (vec2(float(s % AAc), float(s / AAc)) + 0.5) / vec2(float(AAc), float(AAr));
-    float jx = hash21(baseRnd + float(s) * 0.618,  baseRnd * 1.31 + float(s) * 0.371) - 0.5;
-    float jy = hash21(baseRnd * 1.71 + float(s) * 0.537, baseRnd * 2.13 + float(s) * 0.917) - 0.5;
-    float pxu = (2.0 * (float(px.x) + sub.x + jx - 0.5) - res) / res;
-    float pyu = (res - 2.0 * (float(px.y) + sub.y + jy - 0.5)) / res;  // top row = up
+    vec2 hj = vec2(hash31i(pix + 7919, s * 2, seed), hash31i(pix + 7919, s * 2 + 1, seed));
+    vec2 sub = (vec2(float(s % AAc), float(s / AAc)) + hj) / vec2(float(AAc), float(AAr));
+    float pxu = (2.0 * (float(px.x) + sub.x) - res) / res;
+    float pyu = (res - 2.0 * (float(px.y) + sub.y)) / res;  // top row = up
     vec3 rd = normalize(fw * cam.focal + rt * pxu + up * pyu);
-    acc += pathTrace(ro, rd, baseRnd + float(s) * 31.0, float(s));
+    acc += pathTrace(ro, rd, pix, seed, s);
   }
 
   vec3 col = acc * (1.0 / float(AA_SAMPLES)) * 0.96;  // exposure
@@ -358,4 +391,5 @@ void main() {
   outc.z = clamp(col.z * vig + dith, 0.0, 1.0);
   outc.w = 1.0;
   img.c[px.y * IMW + px.x] = outc;
+#endif
 }
