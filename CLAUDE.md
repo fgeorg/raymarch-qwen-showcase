@@ -2,30 +2,31 @@
 
 Headless Vulkan compute path tracer, built via vibecoding with a local Qwen 3.8
 (no hand-written core). Scene + shading live in `src/scene.comp`; the host is
-`src/vkmain.cpp` (device, dispatch, GPU timing, 16-bit PNG writer, 150-frame pan).
+`src/vkmain.cpp` (device, dispatch, GPU timing, 16-bit PNG writer, 720-frame clip:
+12 s @ 60 fps — 7 s pan + 5 s hold).
 
 ## Commands
 
     make            # build
     make run        # one 1024^2 frame -> out/render.png (16-bit, ~6.5 MB), GPU-timed
     make preview    # 512px JPEG -> out/preview.jpg; use THIS for visual iteration
-    make video      # 150-frame clip -> out/showcase.mp4 (deletes out/frames after encode)
-    make frames     # same 150 frames kept in out/frames (regenerable, ~957 MB — never let it accumulate)
+    make video      # 720-frame clip (12 s @ 60 fps) -> out/showcase.mp4 (deletes out/frames after encode)
+    make frames     # same 720 frames kept in out/frames (regenerable, ~4.6 GB — never let it accumulate)
     make diag       # floor-reflection validation: split-mirror render + CPU checker (~10 s)
 
 - Iterate with `make preview` (or `make preview IMG=<png>`), never the full-size 16-bit PNGs.
 - `make run FZZ=0.5` (crisp) .. `FZZ=2.0` (soft) scales the uniform-fuzz specular radius.
 - Quality knobs are #defines: `make GPU_FLAGS="-DAA_SAMPLES=64 -DMAX_STEPS=160 -DMAX_BOUNCES=6"` (defaults: AA 128).
-- Triage targets all render frame 100 and clobber `out/render.png` (restore with
+- Triage targets all render frame 420 and clobber `out/render.png` (restore with
   `make run` afterwards): flatsky, flatfloor, flatboth (flat sky/floor/both),
-  hisamp (AA 512), diff, normview, mirrorview, frame100, plus banding triage:
+  hisamp (AA 512), diff, normview, mirrorview, frame420, plus banding triage:
   shadowmap (exact hard shadow from offset origin), shadowdist / shadowdist09 /
   shadowdistfix / shadowdisttrace (min-SDF shadow field, step variants),
   lobeflip (sun-lobe-only estimator). Run ONE target per
   invocation (FLAGS_STAMP pitfall), or build once and run
-  `./build/vkmain --frame 100 --out out` directly.
+  `./build/vkmain --frame 420 --out out` directly.
 - `tools/*.py` are CPU checkers printing compact PASS/FAIL reports (untracked by design).
-- ~4.5 s/frame at 1024^2 (Intel ADL-N); `make video` is ~15 min — poll it, don't block on it.
+- ~4.5 s/frame at 1024^2 (Intel ADL-N); `make video` is ~1 h (720 frames) — poll it, don't block on it.
 - Penumbra banding (fixed): floor hits in `trace()` now refine to the exact
   y=0 crossing (the eps-band landing was per-pixel staircase-quantized and
   amplified by `offsetSurf`'s doubling lift); `offsetSurf` is a fixed 4-step

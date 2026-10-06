@@ -3,15 +3,15 @@
 #   make            build the GPU (Vulkan compute) renderer
 #   make run        render one 1024^2 frame -> out/render.png (GPU, timed with
 #                   VK_QUERY_TYPE_TIMESTAMP)
-#   make video      150-frame clip (10 s @ 15 fps): 7 s camera pan drops from
+#   make video      720-frame clip (12 s @ 60 fps): 7 s camera pan drops from
 #                   overhead to a level, sun-backlit shot, then holds the
-#                   final pose for the last 3 s -> out/showcase.mp4
+#                   final pose for the last 5 s -> out/showcase.mp4
 #                   (frames are intermediate and deleted after encoding;
 #                   `make frames` keeps them; `make video RES=512` for 512 res)
 #   make preview    512px-wide 8-bit JPEG of a big PNG for cheap visual
 #                   inspection -> out/preview.jpg (`make preview IMG=...`)
-#   make frames     render the 150 clip frames to out/frames (no encoding)
-#   make diff       100%-diffuse debug render of frame 100 -> out/diff.png
+#   make frames     render the 720 clip frames to out/frames (no encoding)
+#   make diff       100%-diffuse debug render of frame 420 -> out/diff.png
 #                   (all materials forced Lambert; banding triage)
 #   make clean      remove build artifacts
 #
@@ -35,7 +35,7 @@ LDLIBS   := -lz -lpthread
 BIN_GPU  := build/vkmain
 SPV      := build/scene.spv
 
-.PHONY: all run video frames preview diag diff flatsky flatfloor flatboth hisamp normview mirrorview shadowmap shadowdist shadowdist09 shadowdistfix shadowdisttrace lobeflip frame100 clean
+.PHONY: all run video frames preview diag diff flatsky flatfloor flatboth hisamp normview mirrorview shadowmap shadowdist shadowdist09 shadowdistfix shadowdisttrace lobeflip frame420 clean
 all: $(BIN_GPU)
 
 # GPU_FLAGS must trigger an SPV rebuild even when scene.comp is untouched
@@ -62,12 +62,12 @@ run: $(BIN_GPU)
 # Render the clip frames and keep them (no encode)
 frames: $(BIN_GPU)
 	mkdir -p out/frames
-	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --res $(RES) --out out/frames
+	$(GPU_ENV) ./$(BIN_GPU) --frames 720 --res $(RES) --out out/frames
 
 video: $(BIN_GPU)
 	mkdir -p out/frames
-	$(GPU_ENV) ./$(BIN_GPU) --frames 150 --res $(RES) --out out/frames
-	ffmpeg -y -framerate 15 -i out/frames/%04d.png -c:v libx264 -pix_fmt yuv420p out/showcase.mp4
+	$(GPU_ENV) ./$(BIN_GPU) --frames 720 --res $(RES) --out out/frames
+	ffmpeg -y -framerate 60 -i out/frames/%04d.png -c:v libx264 -pix_fmt yuv420p out/showcase.mp4
 	rm -rf out/frames
 
 # Small 8-bit JPEG (512px wide) for cheap visual inspection of a big 16-bit
@@ -82,14 +82,14 @@ preview:
 # against analytic ground truth. Clobbers out/render.png (make run restores it).
 diag: GPU_FLAGS=-DDIAG -DAA_SAMPLES=16
 # DIFF: additive debug pass (no changes to main scene behavior). Renders
-# frame 100 with -DDIFF: every material forced to 100% diffuse, so any
+# frame 420 with -DDIFF: every material forced to 100% diffuse, so any
 # banding that survives is in the diffuse sky integration / tonemap, not
 # the specular BSDF. Clobbers out/render.png (make run restores it).
 diff: GPU_FLAGS=-DDIFF
 diff: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/diff.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/diff.png
 
-# Banding triage renders (frame 100, each clobbers out/render.png; make run
+# Banding triage renders (frame 420, each clobbers out/render.png; make run
 # restores it):
 #   flatsky   -DFLATSKY        uniform sky -> isolates sky-gradient banding
 #   flatfloor -DFLATFLOOR      no checker  -> isolates checker moire in gloss
@@ -98,30 +98,30 @@ diff: $(BIN_GPU)
 #                              deterministic (precision/quantization)
 flatsky: GPU_FLAGS=-DFLATSKY
 flatsky: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatsky.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/flatsky.png
 flatfloor: GPU_FLAGS=-DFLATFLOOR
 flatfloor: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatfloor.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/flatfloor.png
 flatboth: GPU_FLAGS=-DFLATSKY -DFLATFLOOR
 flatboth: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/flatboth.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/flatboth.png
 hisamp: GPU_FLAGS=-DAA_SAMPLES=512
 hisamp: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/hisamp.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/hisamp.png
 
-# Sampling-vs-geometry triage (frame 100, single center ray per pixel, no AA
+# Sampling-vs-geometry triage (frame 420, single center ray per pixel, no AA
 # loop; each clobbers out/render.png; make run restores it):
 #   normview    -DNORMVIEW     first-hit normal per pixel (sky black); rings
 #                              here => SDF/normal quantization, not sampling
 #   mirrorview  -DMIRRORVIEW   fuzzReflect direction at u=0.5 per pixel
 normview: GPU_FLAGS=-DNORMVIEW
 normview: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/normview.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/normview.png
 mirrorview: GPU_FLAGS=-DMIRRORVIEW
 mirrorview: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/mirrorview.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/mirrorview.png
 
-# Banding-source triage (frame 100, each clobbers out/render.png; make run
+# Banding-source triage (frame 420, each clobbers out/render.png; make run
 # restores it):
 #   shadowmap -DSHADOWMAP  exact hard shadow from offset floor origin along
 #                          sunDir(); stepped/staircase edge = march +
@@ -131,32 +131,32 @@ mirrorview: $(BIN_GPU)
 #                          smooth = geometry
 shadowmap: GPU_FLAGS=-DSHADOWMAP
 shadowmap: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowmap.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/shadowmap.png
 shadowdist: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST
 shadowdist: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdist.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/shadowdist.png
 shadowdist09: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEP09
 shadowdist09: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdist09.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/shadowdist09.png
 shadowdistfix: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEPFIX
 shadowdistfix: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdistfix.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/shadowdistfix.png
 shadowdisttrace: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEPTRACE
 shadowdisttrace: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdisttrace.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/shadowdisttrace.png
 lobeflip: GPU_FLAGS=-DLOBEFLIP
 lobeflip: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/lobeflip.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/lobeflip.png
 
 # Production render of one clip frame (default AA, no debug defines):
-#   make frame100 -> out/frame100.png (banding baseline is frame 100)
-frame100: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/frame100.png
+#   make frame420 -> out/frame420.png (banding baseline is frame 420)
+frame420: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 420 --out out && mv out/render.png out/frame420.png
 diag: $(BIN_GPU)
-	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/diag_100.png
-	$(GPU_ENV) ./$(BIN_GPU) --frame 149 --out out && mv out/render.png out/diag_149.png
-	python3 tools/diag_check.py out/diag_100.png 100
-	python3 tools/diag_check.py out/diag_149.png 149
+	$(GPU_ENV) ./$(BIN_GPU) --frame 400 --out out && mv out/render.png out/diag_400.png
+	$(GPU_ENV) ./$(BIN_GPU) --frame 719 --out out && mv out/render.png out/diag_719.png
+	python3 tools/diag_check.py out/diag_400.png 400
+	python3 tools/diag_check.py out/diag_719.png 719
 
 clean:
 	rm -rf build out

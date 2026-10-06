@@ -281,11 +281,11 @@ int main(int argc, char** argv) {
     // camera move: starts high overhead looking down at the subject,
     // drops to a level shot aimed at it with the sun in the background
     // (end bearing matches sunDir()'s azimuth). The pan completes at frame
-    // 105 (7 s @ 15 fps); the final pose then holds for the last 3 s
-    // (frames 105-149). p = pan progress, so `--frames 1 --frame N`
+    // 420 (7 s @ 60 fps); the final pose then holds for the last 5 s
+    // (frames 420-719). p = pan progress, so `--frames 1 --frame N`
     // previews the exact video-frame camera. All terms share one
     // smoothstep ease.
-    const double PAN_END = 105.0;  // frame where the pan finishes (7 s)
+    const double PAN_END = 420.0;  // frame where the pan finishes (7 s @ 60 fps)
     double p = std::min(1.0, (double)f / PAN_END);
     double e = p * p * (3.0 - 2.0 * p);
     const double sunAz = atan2(0.56, 0.82);  // = atan2(-sd.z, -sd.x) of sunDir()
