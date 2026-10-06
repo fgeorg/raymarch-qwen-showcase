@@ -16,8 +16,15 @@ Headless Vulkan compute path tracer, built via vibecoding with a local Qwen 3.8
 - Iterate with `make preview` (or `make preview IMG=<png>`), never the full-size 16-bit PNGs.
 - `make run FZZ=0.5` (crisp) .. `FZZ=2.0` (soft) scales the uniform-fuzz specular radius.
 - Quality knobs are #defines: `make GPU_FLAGS="-DAA_SAMPLES=64 -DMAX_STEPS=160 -DMAX_BOUNCES=6"` (defaults: AA 128).
+- Triage targets all render frame 100 and clobber `out/render.png` (restore with
+  `make run` afterwards): flatsky, flatfloor, flatboth (flat sky/floor/both),
+  hisamp (AA 512), diff, normview, mirrorview, frame100. Run ONE target per
+  invocation (FLAGS_STAMP pitfall), or build once and run
+  `./build/vkmain --frame 100 --out out` directly.
 - `tools/*.py` are CPU checkers printing compact PASS/FAIL reports (untracked by design).
-- ~2.4 s/frame at 1024^2 (Intel ADL-N); `make video` is ~11 min blocking.
+- ~4.5 s/frame at 1024^2 (Intel ADL-N); `make video` is ~15 min — poll it, don't block on it.
+- Known issue: stepwise banding in the floor penumbra (sun-lobe contribution;
+  triage + next steps in `todo.md`).
 
 ## Environment
 
