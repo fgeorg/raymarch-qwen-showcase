@@ -35,7 +35,7 @@ LDLIBS   := -lz -lpthread
 BIN_GPU  := build/vkmain
 SPV      := build/scene.spv
 
-.PHONY: all run video frames preview diag diff flatsky flatfloor flatboth hisamp normview mirrorview frame100 clean
+.PHONY: all run video frames preview diag diff flatsky flatfloor flatboth hisamp normview mirrorview shadowmap shadowdist shadowdist09 shadowdistfix shadowdisttrace lobeflip frame100 clean
 all: $(BIN_GPU)
 
 # GPU_FLAGS must trigger an SPV rebuild even when scene.comp is untouched
@@ -120,6 +120,33 @@ normview: $(BIN_GPU)
 mirrorview: GPU_FLAGS=-DMIRRORVIEW
 mirrorview: $(BIN_GPU)
 	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/mirrorview.png
+
+# Banding-source triage (frame 100, each clobbers out/render.png; make run
+# restores it):
+#   shadowmap -DSHADOWMAP  exact hard shadow from offset floor origin along
+#                          sunDir(); stepped/staircase edge = march +
+#                          offsetSurf quantization, not the estimator
+#   lobeflip  -DLOBEFLIP   estimator field of the sun lobe only (linear
+#                          gain, no tonemap); per-pixel mosaic = estimator,
+#                          smooth = geometry
+shadowmap: GPU_FLAGS=-DSHADOWMAP
+shadowmap: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowmap.png
+shadowdist: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST
+shadowdist: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdist.png
+shadowdist09: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEP09
+shadowdist09: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdist09.png
+shadowdistfix: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEPFIX
+shadowdistfix: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdistfix.png
+shadowdisttrace: GPU_FLAGS=-DSHADOWMAP -DSHADOWDIST -DSTEPTRACE
+shadowdisttrace: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/shadowdisttrace.png
+lobeflip: GPU_FLAGS=-DLOBEFLIP
+lobeflip: $(BIN_GPU)
+	$(GPU_ENV) ./$(BIN_GPU) --frame 100 --out out && mv out/render.png out/lobeflip.png
 
 # Production render of one clip frame (default AA, no debug defines):
 #   make frame100 -> out/frame100.png (banding baseline is frame 100)
