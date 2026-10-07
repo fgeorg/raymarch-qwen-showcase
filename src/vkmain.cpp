@@ -291,11 +291,11 @@ int main(int argc, char** argv) {
     const double sunAz = atan2(0.56, 0.82);  // = atan2(-sd.z, -sd.x) of sunDir()
     double th = sunAz + (14.0 * 3.141592653589793 / 180.0) * (1.0 - e);
     double R = 2.60 + (3.20 - 2.60) * e;               // horizontal dist (slight dolly in)
-    double H = 3.30 + (0.92 - 3.30) * e;               // high -> level
+    double H = 3.30 + (1.15 - 3.30) * e;               // high -> level
     u.ro[0] = 0.02f + (float)(R * cos(th));
     u.ro[1] = (float)H;
     u.ro[2] = 0.02f + (float)(R * sin(th));
-    u.time = (float)f;
+    u.time = (float)(f / 60.0);  // seconds; scene freqs are rad/s (old rad/frame x 15 fps)
     u.seed = (float)f * 101.0f;
     u.fuzz = g_fuzz;
     memcpy(uniPtr, &u, sizeof(u));
